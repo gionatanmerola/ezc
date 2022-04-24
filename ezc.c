@@ -415,6 +415,8 @@ enum
     TOK_LPAREN,
     TOK_RPAREN,
 
+    TOK_SEMI,
+
     /* Binary operators */
     TOK_BIN_OP,
 
@@ -504,6 +506,8 @@ _tok_next(int update_source)
             case '(': { ++src; tok.kind = TOK_LPAREN; } break;
             case ')': { ++src; tok.kind = TOK_RPAREN; } break;
 
+            case ';': { ++src; tok.kind = TOK_SEMI; } break;
+
             case '*': { ++src; tok.kind = TOK_STAR; } break;
             case '/': { ++src; tok.kind = TOK_SLASH; } break;
             case '%': { ++src; tok.kind = TOK_PERCENT; } break;
@@ -537,12 +541,13 @@ tok_next()
     return(_tok_next(1));
 }
 
-void
+Token
 tok_expect(int tok_kind)
 {
     Token tok;
     tok = tok_next();
     assert(tok.kind == tok_kind);
+    return(tok);
 }
 
 /*
@@ -683,8 +688,94 @@ parse_expr()
 
 /* TODO: HERE */
 /*
- * <declaration> ::=
+ * <declaration> ::= <type> <identifier> ;'
  */
+
+typedef struct
+Decl
+{
+    Type *type;
+    char *id;
+} Decl;
+
+Decl *
+make_decl(Type *type, char *id)
+{
+    Decl *res = 0;
+
+    res = (Decl *)malloc(sizeof(Decl));
+    if(res)
+    {
+        res->type = type;
+        res->id = id;
+    }
+
+    return(res);
+}
+
+Type *
+get_base_type()
+{
+    Type *type = 0;
+    Token tok;
+
+    tok = tok_peek();
+    switch(tok.kind)
+    {
+        case TOK_KW_INT:
+        {
+            tok_next();
+            type = type_int();
+        } break;
+    }
+
+    return(type);
+}
+
+Type *
+parse_type(Type *base_type)
+{
+    Type *type = 0;
+    Token tok;
+
+    type = base_type;
+
+    tok = tok_peek();
+    while(tok.kind == TOK_STAR)
+    {
+        tok_next();
+        type = type_ptr(type);
+        tok = tok_peek();
+    }
+
+    return(type);
+}
+
+Decl *
+parse_decl()
+{
+    Decl *decl;
+    Type *type;
+    Token tok;
+
+    type = get_base_type();
+    if(!type)
+    {
+        /* TODO: Log error: invalid type */
+    }
+
+    type = parse_type(type);
+
+    tok = tok_expect(TOK_ID);
+
+    decl = make_decl(type, tok.id);
+
+    /* TODO: Parse initialization */
+
+    tok_expect(TOK_SEMI);
+
+    return(decl);
+}
 
 /******************************************************************************/
 /**                                   IRC                                    **/
@@ -786,6 +877,13 @@ compile_expr(FILE *fout, Expr *expr)
             /* TODO: Log error */
         } break;
     }
+}
+
+void
+compile_decl(FILE *fout, Decl *decl)
+{
+    assert(decl->type && decl->type->size > 0);
+    fprintf(fout, "\tsubl %%esp,%d\n", decl->type->size);
 }
 
 #if 0
@@ -1321,6 +1419,7 @@ main(int argc, char *argv[])
     FILE *fout;
     char *src;
     Expr *expr;
+    Decl *decl;
 
     src = "3+2*1";
     parser_init(src);
@@ -1358,6 +1457,16 @@ main(int argc, char *argv[])
     printf("\n");
 
     fout = fopen("a.out.asm", "w");
+
+        src = "int a;";
+    parser_init(src);
+    decl = parse_decl();
+    compile_decl(fout, decl);
+
+    src = "int *ptr;";
+    parser_init(src);
+    decl = parse_decl();
+    compile_decl(fout, decl);
 
     compile_expr(fout, expr);
 
