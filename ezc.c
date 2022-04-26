@@ -253,6 +253,8 @@ sym_add(char *id, Type *type)
     ++sym_table_count;
     res->id = id;
     res->type = type;
+    res->global = 0;
+    res->offset = 0;
 
     return(res);
 }
@@ -653,6 +655,8 @@ print_unit(GlobDecl *unit)
 char *source;
 int source_line;
 
+int func_var_offset;
+
 char *kword_int;
 
 #include <stdarg.h>
@@ -879,6 +883,7 @@ tok_is_type(Token tok)
  *
  * <expr_base> ::= '(' <expr> ')'
  *               | <int_lit>
+ *               | <ident>
  *
  * <bin_op> ::= [/ *]
  *            | [-+]
@@ -899,6 +904,11 @@ parse_expr_base()
         case TOK_INTLIT:
         {
             expr = make_expr_intlit(tok.value);
+        } break;
+
+        case TOK_ID:
+        {
+            expr = make_expr_id(tok.id);
         } break;
 
         case TOK_LPAREN:
@@ -1052,6 +1062,7 @@ parse_decl()
     Decl *decl;
     Type *type;
     Token tok;
+    Sym *sym;
 
     type = get_base_type();
     if(!type)
@@ -1065,7 +1076,10 @@ parse_decl()
 
     decl = make_decl(type, tok.id);
 
-    sym_add(tok.id, type);
+    sym = sym_add(tok.id, type);
+    sym->global = 0;
+    sym->offset = func_var_offset;
+    func_var_offset += type->size;
 
     /* TODO: Parse variable initialization */
 
@@ -1166,6 +1180,7 @@ parse_glob_decl()
     Type *type;
     Token tok;
     char *id;
+    Sym *sym;
 
     type = get_base_type();
     if(!type)
@@ -1183,6 +1198,9 @@ parse_glob_decl()
     {
         tok_expect(TOK_SEMI);
         glob_decl = make_glob_decl_var(id, type);
+
+        sym = sym_add(id, type);
+        sym->global = 1;
     }
     else
     {
@@ -1190,6 +1208,7 @@ parse_glob_decl()
         /* TODO: Parse func params */
         tok_expect(TOK_RPAREN);
 
+        func_var_offset = 0;
         glob_decl = make_glob_decl_func(id, type, parse_stmt_block());
     }
 
@@ -1343,7 +1362,8 @@ compile_decl(FILE *fout, Decl *decl)
 void
 compile_stmt(FILE *fout, Stmt *stmt)
 {
-    int scope;
+    /* TODO: What about the scope */
+    /*int scope;*/
     Stmt *substmt;
 
     switch(stmt->kind)
@@ -1360,14 +1380,14 @@ compile_stmt(FILE *fout, Stmt *stmt)
 
         case STMT_BLOCK:
         {
-            scope = sym_table_count;
+            /*scope = sym_table_count;*/
             substmt = stmt->u.block;
             while(substmt)
             {
                 compile_stmt(fout, substmt);
                 substmt = substmt->next;
             }
-            sym_table_count = scope;
+            /*sym_table_count = scope;*/
         } break;
 
         default:
@@ -1436,10 +1456,10 @@ main(int argc, char *argv[])
 
     src = "int globalvar;\n"
           "int main() {\n"
-          "    int *a;\n"
+          "    int a;\n"
           "    int b;\n"
-          "    int **c;\n"
-          "    3*84/2+2;\n"
+          "    int c;\n"
+          "    a*84/b+c;\n"
           "}";
     parser_init(src);
     unit = parse_unit();
