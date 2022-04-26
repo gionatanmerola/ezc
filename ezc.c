@@ -2,7 +2,39 @@
 #include <string.h>
 #include <stdlib.h>
 
+/******************************************************************************/
+/**                                  UTILS                                   **/
+/******************************************************************************/
+
 #define MALLOC_TYPE(_Type_) (_Type_ *)malloc(sizeof(_Type_))
+
+#include <stdarg.h>
+
+void
+error(char *fmt, ...)
+{
+    va_list ap;
+
+    printf("[!] ERROR: ");
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+void
+fatal(char *fmt, ...)
+{
+    va_list ap;
+
+    printf("[!] ERROR: ");
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+
+    exit(1);
+}
 
 /******************************************************************************/
 /**                            STRING INTERNING                              **/
@@ -188,6 +220,7 @@ type_ptr(Type *base_type)
     {
         res = &(type_ptr_cache[type_ptr_cache_count]);
         ++type_ptr_cache_count;
+        res->kind = TYPE_PTR;
         res->size = 4;
         res->base_type = base_type;
     }
@@ -215,18 +248,6 @@ Sym *
 sym_add(char *id, Type *type)
 {
     Sym *res = 0;
-    int i;
-
-    for(i = 0;
-        i < sym_table_count;
-        ++i)
-    {
-        if(id == sym_table[i].id)
-        {
-            /* TODO: Log error (the symbol with that id already exists) */
-            break;
-        }
-    }
 
     res = &(sym_table[sym_table_count]);
     ++sym_table_count;
@@ -291,7 +312,7 @@ make_expr_intlit(int value)
 {
     Expr *res = 0;
 
-    res = (Expr *)malloc(sizeof(Expr));
+    res = MALLOC_TYPE(Expr);
     if(res)
     {
         res->kind = EXPR_INTLIT;
@@ -306,7 +327,7 @@ make_expr_id(char *id)
 {
     Expr *res = 0;
 
-    res = (Expr *)malloc(sizeof(Expr));
+    res = MALLOC_TYPE(Expr);
     if(res)
     {
         res->kind = EXPR_ID;
@@ -321,7 +342,7 @@ make_expr_unary(int kind, Expr *l)
 {
     Expr *res = 0;
 
-    res = (Expr *)malloc(sizeof(Expr));
+    res = MALLOC_TYPE(Expr);
     if(res)
     {
         res->kind = kind;
@@ -337,7 +358,7 @@ make_expr_binary(int kind, Expr *l, Expr *r)
 {
     Expr *res = 0;
 
-    res = (Expr *)malloc(sizeof(Expr));
+    res = MALLOC_TYPE(Expr);
     if(res)
     {
         res->kind = kind;
@@ -372,7 +393,7 @@ print_expr(Expr *expr)
 
         default:
         {
-            /* TODO: Log error */
+            fatal("Invalid expression");
         } break;
     }
 
@@ -386,6 +407,242 @@ print_expr(Expr *expr)
     }
 }
 
+typedef struct
+Decl
+{
+    Type *type;
+    char *id;
+} Decl;
+
+Decl *
+make_decl(Type *type, char *id)
+{
+    Decl *res = 0;
+
+    res = MALLOC_TYPE(Decl);
+    if(res)
+    {
+        res->type = type;
+        res->id = id;
+    }
+
+    return(res);
+}
+
+void
+print_type(Type *type)
+{
+    if(type == type_void())
+    {
+        printf("void");
+    }
+    else if(type == type_char())
+    {
+        printf("char");
+    }
+    else if(type == type_int())
+    {
+        printf("int");
+    }
+    else if(type->kind == TYPE_PTR)
+    {
+        printf("ptr to ");
+        print_type(type->base_type);
+    }
+    else
+    {
+        fatal("Invalid type to print");
+    }
+}
+
+void
+print_decl(Decl *decl)
+{
+    printf("(var %s ", decl->id);
+    print_type(decl->type);
+    printf(")");
+}
+
+enum
+{
+    STMT_DECL,
+    STMT_EXPR,
+    STMT_BLOCK,
+
+    STMT_COUNT
+};
+
+typedef struct
+Stmt
+{
+    int kind;
+    union
+    {
+        Decl *decl;
+        Expr *expr;
+        struct Stmt *block;
+    } u;
+    struct Stmt *next;
+} Stmt;
+
+Stmt *
+make_stmt(int kind)
+{
+    Stmt *res = 0;
+
+    res = MALLOC_TYPE(Stmt);
+    if(res)
+    {
+        res->kind = kind;
+        res->next = 0;
+    }
+
+    return(res);
+}
+
+void
+print_stmt(Stmt *stmt)
+{
+    Stmt *sub_stmt;
+
+    switch(stmt->kind)
+    {
+        case STMT_DECL:
+        {
+            print_decl(stmt->u.decl);
+        } break;
+
+        case STMT_EXPR:
+        {
+            print_expr(stmt->u.expr);
+        } break;
+
+        case STMT_BLOCK:
+        {
+            printf("(\n");
+            sub_stmt = stmt->u.block;
+            while(sub_stmt)
+            {
+                printf("  ");
+                print_stmt(sub_stmt);
+                sub_stmt = sub_stmt->next;
+            }
+            printf(")");
+        } break;
+
+        default:
+        {
+            fatal("Invalid statement to print");
+        } break;
+    }
+
+    printf("\n");
+}
+
+enum
+{
+    GLOB_DECL_VAR,
+    GLOB_DECL_FUNC,
+
+    GLOB_DECL_COUNT
+};
+
+typedef struct
+GlobDecl
+{
+    int kind;
+    struct GlobDecl *next;
+    char *id;
+    Type *type;
+    Stmt *func_def;
+} GlobDecl;
+
+GlobDecl *
+make_glob_decl(int kind)
+{
+    GlobDecl *res = 0;
+
+    res = MALLOC_TYPE(GlobDecl);
+    if(res)
+    {
+        res->kind = kind;
+        res->next = 0;
+    }
+
+    return(res);
+}
+
+GlobDecl *
+make_glob_decl_var(char *id, Type *type)
+{
+    GlobDecl *res = make_glob_decl(GLOB_DECL_VAR);
+
+    if(res)
+    {
+        res->id = id;
+        res->type = type;
+    }
+
+    return(res);
+}
+
+GlobDecl *
+make_glob_decl_func(char *id, Type *type, Stmt *func_def)
+{
+    GlobDecl *res = make_glob_decl(GLOB_DECL_FUNC);
+
+    if(res)
+    {
+        res->id = id;
+        res->type = type;
+        res->func_def = func_def;
+    }
+
+    return(res);
+}
+
+void
+print_glob_decl(GlobDecl *decl)
+{
+    switch(decl->kind)
+    {
+        case GLOB_DECL_VAR:
+        {
+            printf("(var %s ", decl->id);
+            print_type(decl->type);
+            printf(")");
+        } break;
+
+        case GLOB_DECL_FUNC:
+        {
+            printf("func %s ", decl->id);
+            print_type(decl->type);
+            printf("\n");
+            print_stmt(decl->func_def);
+        } break;
+
+        default:
+        {
+            fatal("Invalid global declaration to print");
+        } break;
+    }
+
+    printf("\n");
+}
+
+void
+print_unit(GlobDecl *unit)
+{
+    GlobDecl *curr;
+
+    curr = unit;
+    while(curr)
+    {
+        print_glob_decl(curr);
+        curr = curr->next;
+    }
+}
+
 /******************************************************************************/
 /**                                 PARSER                                   **/
 /******************************************************************************/
@@ -394,13 +651,43 @@ print_expr(Expr *expr)
 #include <assert.h>
 
 char *source;
+int source_line;
 
 char *kword_int;
+
+#include <stdarg.h>
+
+void
+syntax_error(char *fmt, ...)
+{
+    va_list ap;
+
+    printf("[!] ERROR: Line %d: ", source_line);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+void
+syntax_fatal(char *fmt, ...)
+{
+    va_list ap;
+
+    printf("[!] ERROR: Line %d: ", source_line);
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+
+    exit(1);
+}
 
 void
 parser_init(char *src)
 {
     source = src;
+    source_line = 1;
 
     kword_int = str_intern("int");
 }
@@ -414,6 +701,8 @@ enum
 
     TOK_LPAREN,
     TOK_RPAREN,
+    TOK_LBRACE,
+    TOK_RBRACE,
 
     TOK_SEMI,
 
@@ -447,6 +736,7 @@ _tok_next(int update_source)
 {
     Token tok;
     char *src = source;
+    int srcl = source_line;
 
     if(!*src)
     {
@@ -456,6 +746,10 @@ _tok_next(int update_source)
     {
         while(isspace(*src))
         {
+            if(*src == '\n')
+            {
+                ++srcl;
+            }
             ++src;
         }
 
@@ -505,6 +799,8 @@ _tok_next(int update_source)
 
             case '(': { ++src; tok.kind = TOK_LPAREN; } break;
             case ')': { ++src; tok.kind = TOK_RPAREN; } break;
+            case '{': { ++src; tok.kind = TOK_LBRACE; } break;
+            case '}': { ++src; tok.kind = TOK_RBRACE; } break;
 
             case ';': { ++src; tok.kind = TOK_SEMI; } break;
 
@@ -516,7 +812,7 @@ _tok_next(int update_source)
 
             default:
             {
-                /* TODO: Log error */
+                syntax_fatal("Invalid token");
             } break;
         }
     }
@@ -524,6 +820,7 @@ _tok_next(int update_source)
     if(update_source)
     {
         source = src;
+        source_line = srcl;
     }
 
     return(tok);
@@ -548,6 +845,27 @@ tok_expect(int tok_kind)
     tok = tok_next();
     assert(tok.kind == tok_kind);
     return(tok);
+}
+
+int
+tok_is_type(Token tok)
+{
+    int is_type = 0;
+
+    switch(tok.kind)
+    {
+        case TOK_KW_INT:
+        {
+            is_type = 1;
+        } break;
+
+        default:
+        {
+            is_type = 0;
+        } break;
+    }
+
+    return(is_type);
 }
 
 /*
@@ -591,7 +909,7 @@ parse_expr_base()
 
         default:
         {
-            /* TODO: Log error */
+            syntax_fatal("Invalid base expression");
         } break;
     }
 
@@ -670,7 +988,7 @@ parse_expr_binary(int precedence)
 
             default:
             {
-                /* TODO: Log error */
+                syntax_fatal("Invalid binary expression");
             } break;
         }
 
@@ -686,32 +1004,9 @@ parse_expr()
     return(parse_expr_binary(999));
 }
 
-/* TODO: HERE */
 /*
- * <declaration> ::= <type> <identifier> ;'
+ * <decl> ::= <type> <ident> ';'
  */
-
-typedef struct
-Decl
-{
-    Type *type;
-    char *id;
-} Decl;
-
-Decl *
-make_decl(Type *type, char *id)
-{
-    Decl *res = 0;
-
-    res = (Decl *)malloc(sizeof(Decl));
-    if(res)
-    {
-        res->type = type;
-        res->id = id;
-    }
-
-    return(res);
-}
 
 Type *
 get_base_type()
@@ -761,7 +1056,7 @@ parse_decl()
     type = get_base_type();
     if(!type)
     {
-        /* TODO: Log error: invalid type */
+        syntax_fatal("Invalid type for variable declaration");
     }
 
     type = parse_type(type);
@@ -770,11 +1065,170 @@ parse_decl()
 
     decl = make_decl(type, tok.id);
 
-    /* TODO: Parse initialization */
+    sym_add(tok.id, type);
+
+    /* TODO: Parse variable initialization */
 
     tok_expect(TOK_SEMI);
 
     return(decl);
+}
+
+/*
+ * <stmt> ::= <decl>
+ *          | <expr>
+ *          | <stmt_block>
+ */
+
+Stmt *parse_stmt();
+
+Stmt *
+parse_stmt_block()
+{
+    Stmt *stmt;
+    Stmt *sub_stmt;
+    Token tok;
+
+    tok_expect(TOK_LBRACE);
+
+    stmt = make_stmt(STMT_BLOCK);
+
+    tok = tok_peek();
+    sub_stmt = 0;
+    while(tok.kind != TOK_RBRACE)
+    {
+        if(sub_stmt)
+        {
+            sub_stmt->next = parse_stmt();
+            sub_stmt = sub_stmt->next;
+        }
+        else
+        {
+            sub_stmt = parse_stmt();
+            stmt->u.block = sub_stmt;
+        }
+        tok = tok_peek();
+    }
+
+    tok_expect(TOK_RBRACE);
+
+    return(stmt);
+}
+
+Stmt *
+parse_stmt()
+{
+    Stmt *stmt;
+    Token tok;
+
+    tok = tok_peek();
+    while(tok.kind == TOK_SEMI)
+    {
+        tok_next();
+        tok = tok_peek();
+    }
+
+    if(tok_is_type(tok))
+    {
+        stmt = make_stmt(STMT_DECL);
+        stmt->u.decl = parse_decl();
+    }
+    else
+    {
+        switch(tok.kind)
+        {
+            case TOK_LBRACE:
+            {
+                stmt = parse_stmt_block();
+            } break;
+
+            default:
+            {
+                stmt = make_stmt(STMT_EXPR);
+                stmt->u.expr = parse_expr();
+                tok_expect(TOK_SEMI);
+            } break;
+        }
+    }
+
+    return(stmt);
+}
+
+/*
+ * <glob_decl> ::= <type> <ident> ['(' <func_params> ')' <stmt_block>]?
+ */
+
+GlobDecl *
+parse_glob_decl()
+{
+    GlobDecl *glob_decl = 0;
+
+    Type *type;
+    Token tok;
+    char *id;
+
+    type = get_base_type();
+    if(!type)
+    {
+        syntax_fatal("Invalid type for global declaration");
+    }
+
+    type = parse_type(type);
+
+    tok = tok_expect(TOK_ID);
+    id = tok.id;
+
+    tok = tok_peek();
+    if(tok.kind == TOK_SEMI)
+    {
+        tok_expect(TOK_SEMI);
+        glob_decl = make_glob_decl_var(id, type);
+    }
+    else
+    {
+        tok_expect(TOK_LPAREN);
+        /* TODO: Parse func params */
+        tok_expect(TOK_RPAREN);
+
+        glob_decl = make_glob_decl_func(id, type, parse_stmt_block());
+    }
+
+    return(glob_decl);
+}
+
+/*
+ * <unit> ::= <glob_decl>*
+ */
+
+GlobDecl *
+parse_unit()
+{
+    GlobDecl *first = 0;
+    GlobDecl *last = 0;
+    Token tok;
+
+    tok = tok_peek();
+    while(tok.kind != TOK_EOF)
+    {
+        if(last)
+        {
+            last->next = parse_glob_decl();
+            last = last->next;
+        }
+        else
+        {
+            last = parse_glob_decl();
+        }
+
+        if(!first)
+        {
+            first = last;
+        }
+
+        tok = tok_peek();
+    }
+
+    return(first);
 }
 
 /******************************************************************************/
@@ -783,18 +1237,18 @@ parse_decl()
 
 #include <assert.h>
 
-int lblcount = 0;
+int lbl_count = 0;
 
 void
-genlbl(char *lbl)
+lbl_gen(char *lbl)
 {
     int n;
 
     lbl[0] = '.';
     lbl[1] = 'L';
-    n = sprintf(lbl+2, "%d", lblcount);
+    n = sprintf(lbl+2, "%d", lbl_count);
     lbl[n+2] = 0;
-    ++lblcount;
+    ++lbl_count;
 }
 
 enum
@@ -823,7 +1277,7 @@ compile_expr(FILE *fout, Expr *expr)
             sym = sym_get(expr->id);
             if(!sym)
             {
-                /* TODO: Log error */
+                fatal("Invalid symbol");
             }
 
             /* TODO: Only ints for now */
@@ -874,7 +1328,7 @@ compile_expr(FILE *fout, Expr *expr)
 
         default:
         {
-            /* TODO: Log error */
+            fatal("Invalid expression");
         } break;
     }
 }
@@ -886,589 +1340,113 @@ compile_decl(FILE *fout, Decl *decl)
     fprintf(fout, "\tsubl %%esp,%d\n", decl->type->size);
 }
 
-#if 0
-
-#define MAX_ID_LEN 33
-
-typedef struct
-{
-    char id[MAX_ID_LEN];
-    int global;
-    int type;
-    int subtype;
-    int offset;
-} IrcSym;
-
-IrcSym ircsymtbl[1000];
-int ircsymtblcount = 0;
-
-IrcSym *
-addircsym(char *id, int global, int type)
-{
-    IrcSym *sym;
-
-    sym = &(ircsymtbl[ircsymtblcount]);
-    ++ircsymtblcount;
-
-    strcpy(sym->id, id);
-    sym->global = global;
-    sym->type = type;
-
-    return(sym);
-}
-
-IrcSym *
-getircsym(char *id)
-{
-    int i;
-    IrcSym *sym;
-
-    sym = 0;
-    if(id)
-    {
-        for(i = ircsymtblcount - 1;
-            i >= 0;
-            --i)
-        {
-            if(strcmp(id, ircsymtbl[i].id) == 0)
-            {
-                sym = &(ircsymtbl[i]);
-                break;
-            }
-        }
-    }
-
-    return(sym);
-}
-
-enum
-{
-    IRC_EXPR_INTLIT,
-    IRC_EXPR_ID,
-
-    IRC_EXPR_MUL,
-    IRC_EXPR_DIV,
-    IRC_EXPR_ADD,
-    IRC_EXPR_SUB,
-
-    IRC_EXPR_COUNT
-};
-
-typedef struct
-IrcExpr
-{
-    int kind;
-    int value;
-    char *id;
-    struct IrcExpr *l;
-    struct IrcExpr *r;
-} IrcExpr;
-
-enum
-{
-    IRC_STMT_EXPR,
-    IRC_STMT_ASSIGN,
-    IRC_STMT_GOTO,
-    IRC_STMT_IF,
-    IRC_STMT_LBL,
-    IRC_STMT_RET,
-
-    IRC_STMT_COUNT
-};
-
-typedef struct
-IrcStmt
-{
-    struct IrcStmt *next;
-    int kind;
-    char *lbl;
-    char *id;
-    int deref;
-    IrcExpr *expr;
-} IrcStmt;
-
-enum
-{
-    IRC_GLOB_DECL_FUNC,
-    IRC_GLOB_DECL_VAR,
-
-    IRC_GLOB_DECL_COUNT
-};
-
-typedef struct
-IrcGlobDecl
-{
-    int kind;
-    char *id;
-    int type;
-    int subtype;
-    int init;
-    IrcStmt *stmts;
-    struct IrcGlobDecl *next;
-} IrcGlobDecl;
-
 void
-compexpr(FILE *fout, IrcExpr *expr)
+compile_stmt(FILE *fout, Stmt *stmt)
 {
-    IrcSym *sym = 0;
-
-    switch(expr->kind)
-    {
-        case IRC_EXPR_INTLIT:
-        {
-            fprintf(fout, "\tmovl $%d,%%eax\n", expr->value);
-        } break;
-
-        case IRC_EXPR_ID:
-        {
-            sym = getircsym(expr->id);
-            if(!sym)
-            {
-                /* TODO: Log error */
-            }
-            if(sym->type == IRC_SYM_FUNC)
-            {
-                /* TODO: Log error */
-            }
-            if(sym->global)
-            {
-                fprintf(fout, "\tmovl %s,%%ebx\n", sym->id);
-            }
-            else
-            {
-                fprintf(fout, "\tmovl %d(%%ebp),%%ebx\n", sym->offset);
-            }
-            fprintf(fout, "\tmovl (%%ebx),%%eax\n");
-        } break;
-
-        case IRC_EXPR_MUL:
-        {
-            compexpr(fout, expr->r);
-            fprintf(fout, "\tmovl %%eax,%%ecx\n");
-            compexpr(fout, expr->l);
-            fprintf(fout, "\timull %%ecx,%%eax\n");
-        } break;
-
-        case IRC_EXPR_DIV:
-        {
-            compexpr(fout, expr->r);
-            fprintf(fout, "\tmovl %%eax,%%ecx\n");
-            compexpr(fout, expr->l);
-            fprintf(fout, "\tidivl %%ecx\n");
-        } break;
-
-        case IRC_EXPR_ADD:
-        {
-            compexpr(fout, expr->r);
-            fprintf(fout, "\tmovl %%eax,%%ecx\n");
-            compexpr(fout, expr->l);
-            fprintf(fout, "\taddl %%ecx,%%eax\n");
-        } break;
-
-        case IRC_EXPR_SUB:
-        {
-            compexpr(fout, expr->r);
-            fprintf(fout, "\tmovl %%eax,%%ecx\n");
-            compexpr(fout, expr->l);
-            fprintf(fout, "\tsubl %%ecx,%%eax\n");
-        } break;
-
-        default:
-        {
-            /* TODO: Log error */
-        } break;
-    }
-}
-
-void
-compstmt(FILE *fout, IrcStmt *stmt)
-{
-    IrcSym *sym;
-    char tmplbl[MAX_ID_LEN];
+    int scope;
+    Stmt *substmt;
 
     switch(stmt->kind)
     {
-        case IRC_STMT_EXPR:
+        case STMT_DECL:
         {
-            compexpr(fout, stmt->expr);
+            compile_decl(fout, stmt->u.decl);
         } break;
 
-        case IRC_STMT_ASSIGN:
+        case STMT_EXPR:
         {
-            compexpr(fout, stmt->expr);
-            sym = getircsym(stmt->id);
-            if(!sym)
-            {
-                /* TODO: Log error */
-            }
-            if(sym->type == IRC_SYM_FUNC)
-            {
-                /* TODO: Log error */
-            }
-            if(sym->global)
-            {
-                fprintf(fout, "\tmovl %s,%%ebx\n", sym->id);
-            }
-            else
-            {
-                fprintf(fout, "\tmovl %d(%%ebp),%%ebx\n", sym->offset);
-            }
-            if(stmt->deref)
-            {
-                fprintf(fout, "\tmovl (%%ebx),%%ebx\n");
-            }
-            fprintf(fout, "\tmovl %%eax,(%%ebx)\n");
+            compile_expr(fout, stmt->u.expr);
         } break;
 
-        case IRC_STMT_GOTO:
+        case STMT_BLOCK:
         {
-            fprintf(fout, "\tjmp %s\n", stmt->lbl);
-        } break;
-
-        case IRC_STMT_IF:
-        {
-            compexpr(fout, stmt->expr);
-            genlbl(tmplbl);
-            fprintf(fout, "\tcmpl %%eax,0\n");
-            fprintf(fout, "\tje %s\n", tmplbl);
-            fprintf(fout, "\tjmp %s\n", stmt->lbl);
-            fprintf(fout, "%s:\n", tmplbl);
-        } break;
-
-        case IRC_STMT_LBL:
-        {
-            fprintf(fout, "%s:\n", stmt->lbl);
-        } break;
-
-        case IRC_STMT_RET:
-        {
-            compexpr(fout, stmt->expr);
-            fprintf(fout, "\tleave\n");
-            fprintf(fout, "\tret\n");
+            scope = sym_table_count;
+            substmt = stmt->u.block;
+            while(substmt)
+            {
+                compile_stmt(fout, substmt);
+                substmt = substmt->next;
+            }
+            sym_table_count = scope;
         } break;
 
         default:
         {
-            /* TODO: Log error */
+            fatal("Invalid statement");
         } break;
     }
 }
 
 void
-compdecl(FILE *fout, IrcGlobDecl *decl)
+compile_glob_decl(FILE *fout, GlobDecl *decl)
 {
-    IrcSym *sym;
-    IrcStmt *stmt;
-
-    fprintf(fout, "%s:\n", decl->id);
     switch(decl->kind)
     {
-        case IRC_GLOB_DECL_FUNC:
+        case GLOB_DECL_VAR:
         {
+            fprintf(fout, "%s:\n", decl->id);
+            fprintf(fout, "\t.zero $%d\n", decl->type->size);
+        } break;
+
+        case GLOB_DECL_FUNC:
+        {
+            fprintf(fout, "%s:\n", decl->id);
             fprintf(fout, "\tpushl %%ebp\n");
             fprintf(fout, "\tmovl %%esp,%%ebp\n");
-
-            sym = addircsym(decl->id, 1, IRC_SYM_FUNC);
-
-            stmt = decl->stmts;
-            while(stmt)
-            {
-                compstmt(fout, stmt);
-                stmt = stmt->next;
-            }
-
+            compile_stmt(fout, decl->func_def);
             fprintf(fout, "\tleave\n");
             fprintf(fout, "\tret\n");
         } break;
 
-        case IRC_GLOB_DECL_VAR:
-        {
-            if(decl->init == 0)
-            {
-                fprintf(fout, "\t.zero $4\n");
-            }
-            else
-            {
-                fprintf(fout, "\t.long $%d\n", decl->init);
-            }
-            sym = addircsym(decl->id, 1, decl->type);
-            sym->subtype = decl->subtype;
-        } break;
-
         default:
         {
-            /* TODO: Log error */
+            fatal("Invalid global declaration");
         } break;
     }
 }
 
 void
-compunit(FILE *fout, IrcGlobDecl *decls)
+compile_unit(FILE *fout, GlobDecl *unit)
 {
-    while(decls)
+    GlobDecl *curr;
+
+    curr = unit;
+    while(curr)
     {
-        compdecl(fout, decls);
-        decls = decls->next;
+        compile_glob_decl(fout, curr);
+        curr = curr->next;
     }
 }
 
-IrcGlobDecl *
-mkglobdecl(char *id, int kind)
-{
-    IrcGlobDecl *res = 0;
-
-    res = (IrcGlobDecl *)malloc(sizeof(IrcGlobDecl));
-    if(res)
-    {
-        res->id = id;
-        res->kind = kind;
-    }
-
-    return(res);
-}
-
-IrcStmt *
-mkstmt(int kind)
-{
-    IrcStmt *res = 0;
-
-    res = (IrcStmt *)malloc(sizeof(IrcStmt));
-    if(res)
-    {
-        res->kind = kind;
-        res->next = 0;
-    }
-
-    return(res);
-}
-
-IrcExpr *
-mkbinexpr(int kind, IrcExpr *l, IrcExpr *r)
-{
-    IrcExpr *res = 0;
-
-    res = (IrcExpr *)malloc(sizeof(IrcExpr));
-    if(res)
-    {
-        res->kind = kind;
-        res->l = l;
-        res->r = r;
-    }
-
-    return(res);
-}
-
-IrcExpr *
-mkunexpr(int kind, IrcExpr *l)
-{
-    IrcExpr *res = 0;
-
-    res = (IrcExpr *)malloc(sizeof(IrcExpr));
-    if(res)
-    {
-        res->kind = kind;
-        res->l = l;
-        res->r = 0;
-    }
-
-    return(res);
-}
-
-IrcExpr *
-mkexprintlit(int value)
-{
-    int kind = IRC_EXPR_INTLIT;
-    IrcExpr *res = 0;
-
-    res = (IrcExpr *)malloc(sizeof(IrcExpr));
-    if(res)
-    {
-        res->kind = kind;
-        res->value = value;
-    }
-
-    return(res);
-}
-
-IrcExpr *
-mkexprid(char *id)
-{
-    int kind = IRC_EXPR_ID;
-    IrcExpr *res = 0;
-
-    res = (IrcExpr *)malloc(sizeof(IrcExpr));
-    if(res)
-    {
-        res->kind = kind;
-        res->id = id;
-    }
-
-    return(res);
-}
-
-/******************************************************************************/
-/**                                CODE GEN                                  **/
-/******************************************************************************/
-
-IrcExpr *
-cgexpr(Expr *expr)
-{
-    IrcExpr *res = 0;
-
-    switch(expr->kind)
-    {
-        case EXPR_INTLIT:
-        {
-            res = mkexprintlit(expr->value);
-        } break;
-
-        case EXPR_ID:
-        {
-            res = mkexprid(expr->id);
-        } break;
-
-        case EXPR_MUL:
-        {
-            res = mkbinexpr(IRC_EXPR_MUL, cgexpr(expr->l), cgexpr(expr->r));
-        } break;
-
-        case EXPR_DIV:
-        {
-            res = mkbinexpr(IRC_EXPR_DIV, cgexpr(expr->l), cgexpr(expr->r));
-        } break;
-
-        case EXPR_ADD:
-        {
-            res = mkbinexpr(IRC_EXPR_ADD, cgexpr(expr->l), cgexpr(expr->r));
-        } break;
-
-        case EXPR_SUB:
-        {
-            res = mkbinexpr(IRC_EXPR_SUB, cgexpr(expr->l), cgexpr(expr->r));
-        } break;
-
-        default:
-        {
-            /* TODO: Log error */
-        } break;
-    }
-
-    return(res);
-}
-
-#endif
-
+#if 0
 #define ASMORG_API
 #include "asmorg.c"
+#endif
 
 #include <assert.h>
 
 int
 main(int argc, char *argv[])
 {
-#if 0
-    FILE *fout;
-    IrcGlobDecl *decl;
-    IrcStmt *stmt;
-#if 1
-    IrcStmt *stmt2;
-    IrcStmt *stmt3;
-#endif
-
-    fout = fopen("a.out.asm", "w");
-
-    /* Bootstrap (call main function) */
-    fprintf(fout, "\tcall main\n");
-    fprintf(fout, "\tmovl %%eax,%%ebx\n");
-    fprintf(fout, "\tmovl $1,%%eax\n");
-    fprintf(fout, "\tsyscall\n");
-
-#if 1
-    decl = mkglobdecl("var1", IRC_GLOB_DECL_VAR);
-    decl->type = IRC_SYM_VAR_INT;
-    decl->init = 0;
-    compdecl(fout, decl);
-    decl->id = "var2";
-    decl->type = IRC_SYM_VAR_INT;
-    decl->init = 88;
-    compdecl(fout, decl);
-
-    stmt = mkstmt(IRC_STMT_ASSIGN);
-    stmt->id = "var1";
-    stmt->expr = mkbinexpr(IRC_EXPR_ADD, mkexprid("var2"), mkexprintlit(666));
-
-    stmt2 = mkstmt(IRC_STMT_ASSIGN);
-    stmt2->id = "var2";
-    stmt2->expr = mkbinexpr(IRC_EXPR_SUB, mkexprintlit(999), mkexprintlit(994));
-    stmt->next = stmt2;
-
-    stmt3 = mkstmt(IRC_STMT_RET);
-    stmt3->expr = mkexprid("var2");
-    stmt2->next = stmt3;
-#endif
-
-    decl = mkglobdecl("main", IRC_GLOB_DECL_FUNC);
-    decl->stmts = stmt;
-    compdecl(fout, decl);
-
-    fclose(fout);
-
-    assemble("a.out.asm", "a.out");
-#endif
-
     FILE *fout;
     char *src;
-    Expr *expr;
-    Decl *decl;
-
-    src = "3+2*1";
-    parser_init(src);
-    expr = parse_expr();
-    printf("%s => ", src);
-    print_expr(expr);
-    printf("\n");
-
-    src = "3*2+1";
-    parser_init(src);
-    expr = parse_expr();
-    printf("%s => ", src);
-    print_expr(expr);
-    printf("\n");
-
-    src = "3+2+1";
-    parser_init(src);
-    expr = parse_expr();
-    printf("%s => ", src);
-    print_expr(expr);
-    printf("\n");
-
-    src = "3*2+8/4/9";
-    parser_init(src);
-    expr = parse_expr();
-    printf("%s => ", src);
-    print_expr(expr);
-    printf("\n");
-
-    src = "3*(2+8)/4/9";
-    parser_init(src);
-    expr = parse_expr();
-    printf("%s => ", src);
-    print_expr(expr);
-    printf("\n");
+    GlobDecl *unit;
 
     fout = fopen("a.out.asm", "w");
 
-        src = "int a;";
+    src = "int globalvar;\n"
+          "int main() {\n"
+          "    int *a;\n"
+          "    int b;\n"
+          "    int **c;\n"
+          "    3*84/2+2;\n"
+          "}";
     parser_init(src);
-    decl = parse_decl();
-    compile_decl(fout, decl);
+    unit = parse_unit();
+    print_unit(unit);
+    compile_unit(fout, unit);
 
-    src = "int *ptr;";
-    parser_init(src);
-    decl = parse_decl();
-    compile_decl(fout, decl);
-
-    compile_expr(fout, expr);
+    fclose(fout);
 
     return(0);
 }
