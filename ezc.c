@@ -238,6 +238,7 @@ typedef struct
     Type *type;
     int global;
     int offset;
+    void *func;
 } Sym;
 
 #define SYM_TABLE_SIZE 1000
@@ -255,6 +256,7 @@ sym_add(char *id, Type *type)
     res->type = type;
     res->global = 0;
     res->offset = 0;
+    res->func = 0;
 
     return(res);
 }
@@ -288,13 +290,19 @@ enum
     EXPR_INTLIT,
     EXPR_ID,
 
-    EXPR_NEG,
+    EXPR_UNARY,
+    EXPR_NEG = EXPR_UNARY,
+    EXPR_UNARY_END,
 
-    EXPR_MUL,
+    EXPR_BINARY,
+    EXPR_MUL = EXPR_BINARY,
     EXPR_DIV,
     EXPR_MOD,
     EXPR_ADD,
     EXPR_SUB,
+    EXPR_BINARY_END,
+
+    EXPR_ASSIGN,
 
     EXPR_COUNT
 };
@@ -392,6 +400,8 @@ print_expr(Expr *expr)
         case EXPR_MOD: { op = "%"; } break;
         case EXPR_ADD: { op = "+"; } break;
         case EXPR_SUB: { op = "-"; } break;
+
+        case EXPR_ASSIGN: { op = "="; } break;
 
         default:
         {
@@ -721,6 +731,8 @@ enum
 
     TOK_BIN_OP_END,
 
+    TOK_EQUAL,
+
     TOK_KW_INT,
 
     TOK_COUNT
@@ -813,6 +825,8 @@ _tok_next(int update_source)
             case '%': { ++src; tok.kind = TOK_PERCENT; } break;
             case '+': { ++src; tok.kind = TOK_PLUS; } break;
             case '-': { ++src; tok.kind = TOK_MINUS; } break;
+
+            case '=': { ++src; tok.kind = TOK_EQUAL; } break;
 
             default:
             {
@@ -1009,9 +1023,26 @@ parse_expr_binary(int precedence)
 }
 
 Expr *
+parse_expr_assign()
+{
+    Expr *expr;
+    Token tok;
+
+    expr = parse_expr_binary(999);
+    tok = tok_peek();
+    if(tok.kind == TOK_EQUAL)
+    {
+        tok_next();
+        expr = make_expr_binary(EXPR_ASSIGN, expr, parse_expr_binary(999));
+    }
+
+    return(expr);
+}
+
+Expr *
 parse_expr()
 {
-    return(parse_expr_binary(999));
+    return(parse_expr_assign());
 }
 
 /*
@@ -1062,7 +1093,6 @@ parse_decl()
     Decl *decl;
     Type *type;
     Token tok;
-    Sym *sym;
 
     type = get_base_type();
     if(!type)
@@ -1075,11 +1105,6 @@ parse_decl()
     tok = tok_expect(TOK_ID);
 
     decl = make_decl(type, tok.id);
-
-    sym = sym_add(tok.id, type);
-    sym->global = 0;
-    sym->offset = func_var_offset;
-    func_var_offset += type->size;
 
     /* TODO: Parse variable initialization */
 
@@ -1180,7 +1205,6 @@ parse_glob_decl()
     Type *type;
     Token tok;
     char *id;
-    Sym *sym;
 
     type = get_base_type();
     if(!type)
@@ -1198,9 +1222,6 @@ parse_glob_decl()
     {
         tok_expect(TOK_SEMI);
         glob_decl = make_glob_decl_var(id, type);
-
-        sym = sym_add(id, type);
-        sym->global = 1;
     }
     else
     {
@@ -1208,7 +1229,6 @@ parse_glob_decl()
         /* TODO: Parse func params */
         tok_expect(TOK_RPAREN);
 
-        func_var_offset = 0;
         glob_decl = make_glob_decl_func(id, type, parse_stmt_block());
     }
 
@@ -1251,7 +1271,293 @@ parse_unit()
 }
 
 /******************************************************************************/
-/**                                   IRC                                    **/
+/**                           SEMANTIC ANALYSIS                              **/
+/******************************************************************************/
+
+#include <stdarg.h>
+
+void
+semantic_error(char *fmt, ...)
+{
+    va_list ap;
+
+    printf("[!] ERROR: ");
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+}
+
+void
+semantic_fatal(char *fmt, ...)
+{
+    va_list ap;
+
+    printf("[!] ERROR: ");
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    printf("\n");
+
+    exit(1);
+}
+
+Type *
+eval_expr_type(Expr *expr)
+{
+    Type *type = 0;
+    Type *type1;
+    Type *type2;
+    Sym *sym;
+
+    switch(expr->kind)
+    {
+        case EXPR_ID:
+        {
+            sym = sym_get(expr->id);
+            if(!sym)
+            {
+                semantic_fatal("Invalid symbol %s", expr->id);
+            }
+            type = sym->type;
+        } break;
+
+        case EXPR_INTLIT:
+        {
+            if(expr->value < 256)
+            {
+                type = type_char();
+            }
+            else
+            {
+                type = type_int();
+            }
+        } break;
+
+        default:
+        {
+            if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
+            {
+                type = eval_expr_type(expr->l);
+            }
+            else if((expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END) ||
+                    expr->kind == EXPR_ASSIGN)
+            {
+                type1 = eval_expr_type(expr->l);
+                type2 = eval_expr_type(expr->r);
+                if(type1 == type_void() || type2 == type_void())
+                {
+                    semantic_fatal("Invalid expression type (void in expr)");
+                }
+
+                if((type1 == type_int() && type2 == type_int()) ||
+                   (type1 == type_int() && type2 == type_char()) ||
+                   (type1 == type_char() && type2 == type_int()))
+                {
+                    type = type_int();
+                }
+                else if(type1 == type_char() && type2 == type_char())
+                {
+                    type = type_char();
+                }
+
+                /* TODO: Pointers */
+            }
+            else
+            {
+                semantic_fatal("Invalid expression type");
+            }
+        } break;
+    }
+
+    if(!type)
+    {
+        semantic_fatal("Invalid expression type (no type)");
+    }
+
+    return(type);
+}
+
+int
+check_lvalue(Expr *expr)
+{
+    int res = 0;
+
+    if(expr->kind != EXPR_ID)
+    {
+        semantic_fatal("Invalid lvalue");
+    }
+
+    res = 1;
+    return(res);
+}
+
+int
+check_expr(Expr *expr)
+{
+    int res = 0;
+    Sym *sym;
+
+    switch(expr->kind)
+    {
+        case EXPR_ID:
+        {
+            sym = sym_get(expr->id);
+            if(!sym)
+            {
+                semantic_fatal("Invalid symbol %s", expr->id);
+            }
+            res = (eval_expr_type(expr) != 0);
+        } break;
+
+        case EXPR_INTLIT:
+        {
+            res = (eval_expr_type(expr) != 0);
+        } break;
+
+        default:
+        {
+            if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
+            {
+                res = check_expr(expr->l) && eval_expr_type(expr);
+            }
+            else if(expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END)
+            {
+                res = (check_expr(expr->l) &&
+                       check_expr(expr->r) &&
+                       eval_expr_type(expr) != 0);
+            }
+            else if(expr->kind == EXPR_ASSIGN)
+            {
+                res = (check_lvalue(expr->l) &&
+                       check_expr(expr->r) &&
+                       eval_expr_type(expr) != 0);
+            }
+            else
+            {
+                res = 0;
+            }
+        } break;
+    }
+
+    return(res);
+}
+
+int
+check_stmt(Stmt *stmt)
+{
+    int res = 0;
+    Sym *sym;
+    Decl *decl;
+    Stmt *curr;
+
+    switch(stmt->kind)
+    {
+        case STMT_DECL:
+        {
+            decl = stmt->u.decl;
+            sym = sym_get(decl->id);
+            if(sym)
+            {
+                semantic_fatal("Symbol '%s' already declared", decl->id);
+            }
+
+            sym = sym_add(decl->id, decl->type);
+            sym->global = 0;
+            sym->offset = func_var_offset;
+            func_var_offset += decl->type->size;
+
+            res = 1;
+        } break;
+
+        case STMT_EXPR:
+        {
+            res = check_expr(stmt->u.expr);
+        } break;
+
+        case STMT_BLOCK:
+        {
+            res = 1;
+            curr = stmt->u.block;
+            while(curr)
+            {
+                res = res && check_stmt(curr);
+                curr = curr->next;
+            }
+        } break;
+
+        default:
+        {
+            res = 0;
+        } break;
+    }
+
+    return(res);
+}
+
+int
+check_glob_decl(GlobDecl *decl)
+{
+    int res = 0;
+    Sym *sym;
+
+    switch(decl->kind)
+    {
+        case GLOB_DECL_VAR:
+        {
+            sym = sym_get(decl->id);
+            if(sym)
+            {
+                semantic_fatal("Symbol '%s' already declared", decl->id);
+            }
+
+            sym = sym_add(decl->id, decl->type);
+            sym->global = 1;
+
+            res = 1;
+        } break;
+
+        case GLOB_DECL_FUNC:
+        {
+            sym = sym_get(decl->id);
+            if(sym)
+            {
+                semantic_fatal("Symbol '%s' already declared", decl->id);
+            }
+
+            /* TODO: Add symbol */
+
+            func_var_offset = 0;
+            res = check_stmt(decl->func_def);
+        } break;
+
+        default:
+        {
+            res = 0;
+        } break;
+    }
+
+    return(res);
+}
+
+int
+check_unit(GlobDecl *unit)
+{
+    int res = 1;
+    GlobDecl *curr;
+
+    curr = unit;
+    while(curr)
+    {
+        res = res && check_glob_decl(curr);
+        curr = curr->next;
+    }
+
+    return(res);
+}
+
+/******************************************************************************/
+/**                               CODE GEN                                   **/
 /******************************************************************************/
 
 #include <assert.h>
@@ -1270,14 +1576,40 @@ lbl_gen(char *lbl)
     ++lbl_count;
 }
 
-enum
+void
+compile_lvalue(FILE *fout, Expr *expr)
 {
-    IRC_SYM_FUNC,
-    IRC_SYM_VAR_INT,
-    IRC_SYM_VAR_PTR,
+    Sym *sym;
 
-    IRC_SYM_TYPES_COUNT
-};
+    switch(expr->kind)
+    {
+        case EXPR_ID:
+        {
+            sym = sym_get(expr->id);
+            if(!sym)
+            {
+                fatal("Invalid symbol");
+            }
+
+            /* TODO: Only ints for now */
+            assert(sym->type == type_int());
+
+            if(sym->global)
+            {
+                fprintf(fout, "\tmovl %s,%%eax\n", sym->id);
+            }
+            else
+            {
+                fprintf(fout, "\tmovl %d(%%ebp),%%eax\n", sym->offset);
+            }
+        } break;
+
+        default:
+        {
+            fatal("Invalid lvalue");
+        } break;
+    }
+}
 
 void
 compile_expr(FILE *fout, Expr *expr)
@@ -1343,6 +1675,14 @@ compile_expr(FILE *fout, Expr *expr)
             fprintf(fout, "\tmovl %%eax,%%ecx\n");
             compile_expr(fout, expr->l);
             fprintf(fout, "\tsubl %%ecx,%%eax\n");
+        } break;
+
+        case EXPR_ASSIGN:
+        {
+            compile_expr(fout, expr->r);
+            fprintf(fout, "\tmovl %%eax,%%ecx\n");
+            compile_lvalue(fout, expr->l);
+            fprintf(fout, "\tmovl %%ecx,(%%eax)\n");
         } break;
 
         default:
@@ -1459,10 +1799,13 @@ main(int argc, char *argv[])
           "    int a;\n"
           "    int b;\n"
           "    int c;\n"
-          "    a*84/b+c;\n"
+          "    globalvar = 2;\n"
+          "    a = 3;\n"
+          "    b = a + globalvar;\n"
           "}";
     parser_init(src);
     unit = parse_unit();
+    check_unit(unit);
     print_unit(unit);
     compile_unit(fout, unit);
 
