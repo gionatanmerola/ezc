@@ -168,23 +168,51 @@ str_intern(char *s)
  * 
  */
 
+typedef struct Type Type;
+
+typedef struct
+FuncParam
+{
+    char *id;
+    Type *type;
+    struct FuncParam *next;
+} FuncParam;
+
+FuncParam *
+make_func_param(char *id, Type *type)
+{
+    FuncParam *res;
+
+    res = MALLOC_TYPE(FuncParam);
+    if(res)
+    {
+        res->id = id;
+        res->type = type;
+        res->next = 0;
+    }
+
+    return(res);
+}
+
 enum
 {
     TYPE_VOID,
     TYPE_CHAR,
     TYPE_INT,
     TYPE_PTR,
+    TYPE_FUNC,
 
     TYPE_COUNT
 };
 
-typedef struct
+struct
 Type
 {
     int kind;
     int size;
     struct Type *base_type;
-} Type;
+    FuncParam *params;
+};
 
 Type _type_void = { TYPE_VOID, 0, 0 };
 Type _type_char = { TYPE_CHAR, 1, 0 };
@@ -236,6 +264,22 @@ type_ptr(Type *base_type)
         res->kind = TYPE_PTR;
         res->size = 4;
         res->base_type = base_type;
+    }
+
+    return(res);
+}
+
+Type *
+type_func(Type *ret_type, FuncParam *params)
+{
+    Type *res;
+
+    res = MALLOC_TYPE(Type);
+    if(res)
+    {
+        res->kind = TYPE_FUNC;
+        res->base_type = ret_type;
+        res->params = params;
     }
 
     return(res);
@@ -300,6 +344,13 @@ sym_get(char *id)
     return(res);
 }
 
+void
+init_builtin_sym()
+{
+    /* TODO: This is a type function not int */
+    sym_add("putchar", type_int());
+}
+
 /******************************************************************************/
 /**                                  AST                                     **/
 /******************************************************************************/
@@ -308,6 +359,8 @@ enum
 {
     EXPR_INTLIT,
     EXPR_ID,
+
+    EXPR_CALL,
 
     EXPR_UNARY,
     EXPR_NEG = EXPR_UNARY,
@@ -333,7 +386,16 @@ Expr
     char *id;
     struct Expr *l;
     struct Expr *r;
+    struct Expr *next;
 } Expr;
+
+Expr *
+dup_expr(Expr *expr)
+{
+    Expr *new;
+    new = DUP_OBJ(Expr, new, expr);
+    return(new);
+}
 
 Expr *
 make_expr_intlit(int value)
@@ -345,6 +407,7 @@ make_expr_intlit(int value)
     {
         res->kind = EXPR_INTLIT;
         res->value = value;
+        res->next = 0;
     }
 
     return(res);
@@ -360,6 +423,7 @@ make_expr_id(char *id)
     {
         res->kind = EXPR_ID;
         res->id = id;
+        res->next = 0;
     }
 
     return(res);
@@ -376,6 +440,7 @@ make_expr_unary(int kind, Expr *l)
         res->kind = kind;
         res->l = l;
         res->r = 0;
+        res->next = 0;
     }
 
     return(res);
@@ -392,6 +457,7 @@ make_expr_binary(int kind, Expr *l, Expr *r)
         res->kind = kind;
         res->l = l;
         res->r = r;
+        res->next = 0;
     }
 
     return(res);
@@ -401,6 +467,7 @@ void
 print_expr(Expr *expr)
 {
     char *op = 0;
+
     switch(expr->kind)
     {
         case EXPR_ID:
@@ -411,6 +478,11 @@ print_expr(Expr *expr)
         case EXPR_INTLIT:
         {
             printf("%d", expr->value);
+        } break;
+
+        case EXPR_CALL:
+        {
+            printf("call %s", expr->l->id);
         } break;
 
         case EXPR_MUL: { op = "*"; } break;
@@ -657,9 +729,12 @@ print_glob_decl(GlobDecl *decl)
         case GLOB_DECL_FUNC:
         {
             printf("(func %s ", decl->id);
-            print_type(decl->type);
-            printf("\n");
-            print_stmt(decl->func_def);
+            print_type(decl->type->base_type);
+            if(decl->func_def)
+            {
+                printf("\n");
+                print_stmt(decl->func_def);
+            }
             printf(")\n");
         } break;
 
@@ -753,6 +828,7 @@ enum
     TOK_RBRACE,
 
     TOK_SEMI,
+    TOK_COMMA,
 
     /* Binary operators */
     TOK_BIN_OP,
@@ -856,6 +932,7 @@ _tok_next(int update_source)
             case '}': { ++src; tok.kind = TOK_RBRACE; } break;
 
             case ';': { ++src; tok.kind = TOK_SEMI; } break;
+            case ',': { ++src; tok.kind = TOK_COMMA; } break;
 
             case '*': { ++src; tok.kind = TOK_STAR; } break;
             case '/': { ++src; tok.kind = TOK_SLASH; } break;
@@ -941,6 +1018,16 @@ tok_is_type(Token tok)
  * <un_op> ::= [-+]
  */
 
+int op_precedence_table[TOK_BIN_OP_END - TOK_BIN_OP] = {
+    0, /* TOK_STAR */
+    0, /* TOK_SLASH */
+    0, /* TOK_PERCENT */
+    1, /* TOK_PLUS */
+    1, /* TOK_MINUS */
+    8, /* TOK_EQUAL */
+};
+
+Expr *parse_expr_binary(int precedence);
 Expr *parse_expr();
 
 Expr *
@@ -978,6 +1065,80 @@ parse_expr_base()
 }
 
 Expr *
+reverse_args_list(Expr *args)
+{
+    Expr *res;
+
+    res = 0;
+    if(!args || !(args->next))
+    {
+        res = args;
+    }
+    else
+    {
+        res = reverse_args_list(args->next);
+        args->next->next = args;
+        args->next = 0;
+    }
+
+    return(res);
+}
+
+Expr *
+parse_expr_unary_post()
+{
+    Expr *expr = 0;
+    Expr *args = 0;
+    Expr *arg = 0;
+    int prec;
+    Token tok;
+
+    expr = parse_expr_base();
+
+    tok = tok_peek();
+    switch(tok.kind)
+    {
+        case TOK_LPAREN:
+        {
+            tok_next();
+            tok = tok_peek();
+            if(tok.kind != TOK_RPAREN)
+            {
+                do
+                {
+                    if(tok.kind == TOK_COMMA)
+                    {
+                        tok_next();
+                    }
+                    prec = op_precedence_table[TOK_EQUAL];
+                    if(arg)
+                    {
+                        arg->next = parse_expr_binary(prec);
+                        arg = arg->next;
+                    }
+                    else
+                    {
+                        arg = parse_expr_binary(prec);
+                        args = arg;
+                    }
+                    tok = tok_peek();
+                }
+                while(tok.kind == TOK_COMMA);
+            }
+            tok_expect(TOK_RPAREN);
+
+            if(args)
+            {
+                args = reverse_args_list(args);
+            }
+            expr = make_expr_binary(EXPR_CALL, expr, args);
+        } break;
+    }
+
+    return(expr);
+}
+
+Expr *
 parse_expr_unary()
 {
     Expr *expr = 0;
@@ -996,26 +1157,17 @@ parse_expr_unary()
         case TOK_PLUS:
         {
             tok_next();
-            expr = parse_expr_base();
+            expr = parse_expr_unary_post();
         } break;
 
         default:
         {
-            expr = parse_expr_base();
+            expr = parse_expr_unary_post();
         } break;
     }
 
     return(expr);
 }
-
-int op_precedence_table[TOK_BIN_OP_END - TOK_BIN_OP] = {
-    0, /* TOK_STAR */
-    0, /* TOK_SLASH */
-    0, /* TOK_PERCENT */
-    1, /* TOK_PLUS */
-    1, /* TOK_MINUS */
-    8, /* TOK_EQUAL */
-};
 
 Expr *
 parse_expr_binary(int precedence)
@@ -1246,8 +1398,33 @@ parse_stmt()
 }
 
 /*
- * <glob_decl> ::= <type> <ident> ['(' <func_params> ')' <stmt_block>]?
+ * <glob_decl> ::= <type> <ident> ['(' <func_params>? ')' [<stmt_block>|';']]?
+ * <func_params> ::= <type> <ident>
  */
+
+FuncParam *
+parse_func_param()
+{
+    FuncParam *param;
+    char *id;
+    Type *type;
+    Token tok;
+
+    type = get_base_type();
+    if(!type)
+    {
+        syntax_fatal("Invalid type for function parameter");
+    }
+
+    type = parse_type(type);
+
+    tok = tok_expect(TOK_ID);
+    id = tok.id;
+
+    param = make_func_param(id, type);
+
+    return(param);
+}
 
 GlobDecl *
 parse_glob_decl()
@@ -1257,6 +1434,9 @@ parse_glob_decl()
     Type *type;
     Token tok;
     char *id;
+    FuncParam *params;
+    FuncParam *curr_param;
+    Stmt *func_def;
 
     type = get_base_type();
     if(!type)
@@ -1277,11 +1457,45 @@ parse_glob_decl()
     }
     else
     {
+        params = 0;
+
         tok_expect(TOK_LPAREN);
-        /* TODO: Parse func params */
+        tok = tok_peek();
+        while(tok.kind != TOK_RPAREN)
+        {
+            if(curr_param)
+            {
+                curr_param->next = parse_func_param();
+                curr_param = curr_param->next;
+            }
+            else
+            {
+                curr_param = parse_func_param();
+                curr_param->next = 0;
+                params = curr_param;
+            }
+
+            tok = tok_peek();
+            if(tok.kind != TOK_COMMA)
+            {
+                break;
+            }
+        }
         tok_expect(TOK_RPAREN);
 
-        glob_decl = make_glob_decl_func(id, type, parse_stmt_block());
+        type = type_func(type, params);
+
+        func_def = 0;
+        tok = tok_peek();
+        if(tok.kind == TOK_LBRACE)
+        {
+            func_def = parse_stmt_block();
+        }
+        else
+        {
+            tok_expect(TOK_SEMI);
+        }
+        glob_decl = make_glob_decl_func(id, type, func_def);
     }
 
     return(glob_decl);
@@ -1388,7 +1602,30 @@ eval_expr_type(Expr *expr)
 
         default:
         {
-            if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
+            if(expr->kind == EXPR_CALL)
+            {
+                if(expr->l->kind != EXPR_ID)
+                {
+                    semantic_fatal("Invalid function call");
+                }
+
+                sym = sym_get(expr->l->id);
+                if(!sym)
+                {
+                    semantic_fatal("Invalid symbol %s", expr->l->id);
+                }
+                if(!sym->global)
+                {
+                    semantic_fatal("Invalid function call: %s not a global symbol", sym->id);
+                }
+                if(sym->type->kind != TYPE_FUNC)
+                {
+                    semantic_fatal("Invalid function call: %s is not a function", sym->id);
+                }
+
+                type = sym->type->base_type;
+            }
+            else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
             {
                 type = eval_expr_type(expr->l);
             }
@@ -1469,7 +1706,26 @@ check_expr(Expr *expr)
 
         default:
         {
-            if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
+            if(expr->kind == EXPR_CALL)
+            {
+                if(expr->l->kind != EXPR_ID)
+                {
+                    semantic_fatal("Invalid function call");
+                }
+
+                sym = sym_get(expr->l->id);
+                if(!sym->global)
+                {
+                    semantic_fatal("Invalid function call: %s not a global symbol", sym->id);
+                }
+                if(sym->type->kind != TYPE_FUNC)
+                {
+                    semantic_fatal("Invalid function call: %s is not a function", sym->id);
+                }
+
+                res = (eval_expr_type(expr) != 0);
+            }
+            else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
             {
                 res = check_expr(expr->l) && eval_expr_type(expr);
             }
@@ -1577,7 +1833,8 @@ check_glob_decl(GlobDecl *decl)
                 semantic_fatal("Symbol '%s' already declared", decl->id);
             }
 
-            /* TODO: Add symbol */
+            sym = sym_add(decl->id, decl->type);
+            sym->global = 1;
 
             func_var_offset = -4;
             res = check_stmt(decl->func_def);
@@ -1597,6 +1854,8 @@ check_unit(GlobDecl *unit)
 {
     int res = 1;
     GlobDecl *curr;
+
+    init_builtin_sym();
 
     curr = unit;
     while(curr)
@@ -1695,6 +1954,10 @@ store_expr_temp_var(Expr *expr, int first)
     Expr *l;
     Expr *r;
 
+    Expr *args;
+    Expr *arg;
+    Expr *tmp;
+
     if(!first)
     {
         res = tmp_var();
@@ -1702,7 +1965,8 @@ store_expr_temp_var(Expr *expr, int first)
         stmt->u.decl = make_decl(eval_expr_type(expr), res);
         add_stmt(stmt);
     }
-    if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
+
+    if(expr->kind == EXPR_CALL)
     {
         if(expr_is_atom(expr->l))
         {
@@ -1713,7 +1977,49 @@ store_expr_temp_var(Expr *expr, int first)
             l = make_expr_id(store_expr_temp_var(expr->l, 0));
         }
 
-        rvalue = make_expr_unary(expr->kind, l);
+        args = 0;
+        arg = 0;
+        r = expr->r;
+        while(r)
+        {
+            tmp = 0;
+            if(expr_is_atom(r))
+            {
+                tmp = dup_expr(r);
+            }
+            else
+            {
+                tmp = make_expr_id(store_expr_temp_var(r, 0));
+            }
+
+            if(arg)
+            {
+                arg->next = tmp;
+                arg = arg->next;
+            }
+            else
+            {
+                arg = tmp;
+                args = arg;
+            }
+            arg->next = 0;
+
+            r = r->next;
+        }
+
+        rvalue = make_expr_binary(EXPR_CALL, l, args);
+    }
+    else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
+    {
+        if(expr_is_atom(expr->l))
+        {
+            l = expr->l;
+        }
+        else
+        {
+            l = make_expr_id(store_expr_temp_var(expr->l, 0));
+        }
+        rvalue = make_expr_binary(expr->kind, l, expr->r);
     }
     else if(expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END)
     {
@@ -1739,10 +2045,9 @@ store_expr_temp_var(Expr *expr, int first)
     }
     else
     {
-        print_expr(expr);
-        printf("\nEXPR KIND: %d\n", expr->kind);
         assert(0);
     }
+
     if(!first)
     {
         stmt = make_stmt(STMT_EXPR);
@@ -1878,7 +2183,12 @@ unit_to_irc(GlobDecl *unit)
 
             case GLOB_DECL_FUNC:
             {
-                irc_curr->func_def = block_to_irc(glob_decl->func_def);
+                if(glob_decl->func_def)
+                {
+                    irc_curr->func_def = block_to_irc(glob_decl->func_def);
+                }
+                sym = sym_add(glob_decl->id, glob_decl->type);
+                sym->global = 1;
             } break;
 
             default:
@@ -1953,6 +2263,8 @@ void
 compile_expr(FILE *fout, Expr *expr)
 {
     Sym *sym = 0;
+    Expr *arg;
+    int argc;
 
     switch(expr->kind)
     {
@@ -1980,6 +2292,42 @@ compile_expr(FILE *fout, Expr *expr)
             else
             {
                 fprintf(fout, "\tmovl %d(%%ebp),%%eax\n", sym->offset);
+            }
+        } break;
+
+        case EXPR_CALL:
+        {
+            if(expr->l->kind == EXPR_ID)
+            {
+                sym = sym_get(expr->l->id);
+                if(!sym)
+                {
+                    fatal("Invalid symbol %s", expr->l->id);
+                }
+
+                assert(sym->type->kind == TYPE_FUNC);
+
+                argc = 0;
+                arg = expr->r;
+                while(arg)
+                {
+                    ++argc;
+                    compile_expr(fout, arg);
+                    fprintf(fout, "\tpushl %%eax\n");
+                    arg = arg->next;
+                }
+
+                fprintf(fout, "\tcall %s\n", expr->l->id);
+
+                while(argc > 0)
+                {
+                    fprintf(fout, "\tpopl %%eax\n");
+                    --argc;
+                }
+            }
+            else
+            {
+                fatal("We don't handle \"complex\" function calls");
             }
         } break;
 
@@ -2126,12 +2474,18 @@ compile_glob_decl(FILE *fout, GlobDecl *decl)
         {
             func_var_offset = -4;
 
-            fprintf(fout, "%s:\n", decl->id);
-            fprintf(fout, "\tpushl %%ebp\n");
-            fprintf(fout, "\tmovl %%esp,%%ebp\n");
-            compile_stmt(fout, decl->func_def);
-            fprintf(fout, "\tleave\n");
-            fprintf(fout, "\tret\n");
+            if(decl->func_def)
+            {
+                fprintf(fout, "%s:\n", decl->id);
+                fprintf(fout, "\tpushl %%ebp\n");
+                fprintf(fout, "\tmovl %%esp,%%ebp\n");
+                compile_stmt(fout, decl->func_def);
+                fprintf(fout, "\tleave\n");
+                fprintf(fout, "\tret\n");
+            }
+
+            sym = sym_add(decl->id, decl->type);
+            sym->global = 1;
         } break;
 
         default:
@@ -2174,8 +2528,10 @@ compile_unit(FILE *fout, GlobDecl *unit)
         }
         fclose(flibc);
     }
+
+    sym_add(str_intern("putchar"), type_func(type_int(), ));
 #else
-    /* TODO: Hardcode libc into C code string */
+    /* TODO: Hardcode libc into a C string */
 #endif
 
     curr = unit;
@@ -2193,6 +2549,8 @@ compile_unit(FILE *fout, GlobDecl *unit)
 
 #include <assert.h>
 
+#define PRINT 1
+
 int
 main(int argc, char *argv[])
 {
@@ -2203,22 +2561,23 @@ main(int argc, char *argv[])
     fout = fopen("a.out.asm", "w");
 
     src = "int globalvar;\n"
+          "int putchar(int c);\n"
+          "int foo() { return 69; }\n"
           "int main() {\n"
-          "int a;\n"
-          "int b;\n"
-          "    a=2;\n"
-          "    b=3;\n"
-          "    globalvar = (2+(a*b));\n"
-          "    return globalvar;\n"
+          "    return foo();\n"
           "}";
     parser_init(src);
     unit = parse_unit();
     check_unit(unit);
+#if PRINT
     print_unit(unit);
-    printf("%s\n\n+++++++++++++++\nIRC\n+++++++++++++++\n\n", src);
+    printf("\n\n+++++++++++++++\nIRC\n+++++++++++++++\n\n");
+#endif
     unit = unit_to_irc(unit);
+#if PRINT
     print_unit(unit);
     printf("\n\n+++++++++++++++\nx86\n+++++++++++++++\n\n");
+#endif
     compile_unit(fout, unit);
 
     fclose(fout);
