@@ -357,13 +357,19 @@ init_builtin_sym()
 
 enum
 {
+    EXPR_INVALID,
+
     EXPR_INTLIT,
     EXPR_ID,
 
     EXPR_CALL,
 
     EXPR_UNARY,
-    EXPR_NEG = EXPR_UNARY,
+    EXPR_INC_PRE = EXPR_UNARY,
+    EXPR_DEC_PRE,
+    EXPR_NEG,
+    EXPR_DEREF,
+    EXPR_ADDR_OF,
     EXPR_UNARY_END,
 
     EXPR_BINARY,
@@ -483,6 +489,41 @@ print_expr(Expr *expr)
         case EXPR_CALL:
         {
             printf("call %s", expr->l->id);
+        } break;
+
+        case EXPR_INC_PRE:
+        {
+            printf("(inc ");
+            print_expr(expr->l);
+            printf(")");
+        } break;
+
+        case EXPR_DEC_PRE:
+        {
+            printf("(dec ");
+            print_expr(expr->l);
+            printf(")");
+        } break;
+
+        case EXPR_DEREF:
+        {
+            printf("(deref ");
+            print_expr(expr->l);
+            printf(")");
+        } break;
+
+        case EXPR_ADDR_OF:
+        {
+            printf("(addrof ");
+            print_expr(expr->l);
+            printf(")");
+        } break;
+
+        case EXPR_NEG:
+        {
+            printf("(-");
+            print_expr(expr->l);
+            printf(")");
         } break;
 
         case EXPR_MUL: { op = "*"; } break;
@@ -829,11 +870,15 @@ enum
 
     TOK_SEMI,
     TOK_COMMA,
+    TOK_AMPERSAND,
+
+    TOK_PLUS_PLUS,
+    TOK_MINUS_MINUS,
 
     /* Binary operators */
     TOK_BIN_OP,
 
-    TOK_STAR = TOK_BIN_OP,
+    TOK_ASTERISK = TOK_BIN_OP,
     TOK_SLASH,
     TOK_PERCENT,
     TOK_PLUS,
@@ -933,12 +978,33 @@ _tok_next(int update_source)
 
             case ';': { ++src; tok.kind = TOK_SEMI; } break;
             case ',': { ++src; tok.kind = TOK_COMMA; } break;
+            case '&': { ++src; tok.kind = TOK_AMPERSAND; } break;
 
-            case '*': { ++src; tok.kind = TOK_STAR; } break;
+            case '*': { ++src; tok.kind = TOK_ASTERISK; } break;
             case '/': { ++src; tok.kind = TOK_SLASH; } break;
             case '%': { ++src; tok.kind = TOK_PERCENT; } break;
-            case '+': { ++src; tok.kind = TOK_PLUS; } break;
-            case '-': { ++src; tok.kind = TOK_MINUS; } break;
+
+            case '+':
+            {
+                ++src;
+                tok.kind = TOK_PLUS;
+                if(*src == '+')
+                {
+                    ++src;
+                    tok.kind = TOK_PLUS_PLUS;
+                }
+            } break;
+
+            case '-':
+            {
+                ++src;
+                tok.kind = TOK_MINUS;
+                if(*src == '-')
+                {
+                    ++src;
+                    tok.kind = TOK_MINUS_MINUS;
+                }
+            } break;
 
             case '=': { ++src; tok.kind = TOK_EQUAL; } break;
 
@@ -1019,7 +1085,7 @@ tok_is_type(Token tok)
  */
 
 int op_precedence_table[TOK_BIN_OP_END - TOK_BIN_OP] = {
-    0, /* TOK_STAR */
+    0, /* TOK_ASTERISK */
     0, /* TOK_SLASH */
     0, /* TOK_PERCENT */
     1, /* TOK_PLUS */
@@ -1147,6 +1213,20 @@ parse_expr_unary()
     tok = tok_peek();
     switch(tok.kind)
     {
+        case TOK_PLUS_PLUS:
+        {
+            tok_next();
+            expr = parse_expr_unary();
+            expr = make_expr_unary(EXPR_INC_PRE, expr);
+        } break;
+
+        case TOK_MINUS_MINUS:
+        {
+            tok_next();
+            expr = parse_expr_unary();
+            expr = make_expr_unary(EXPR_DEC_PRE, expr);
+        } break;
+
         case TOK_MINUS:
         {
             tok_next();
@@ -1157,7 +1237,21 @@ parse_expr_unary()
         case TOK_PLUS:
         {
             tok_next();
-            expr = parse_expr_unary_post();
+            expr = parse_expr_unary();
+        } break;
+
+        case TOK_ASTERISK:
+        {
+            tok_next();
+            expr = parse_expr_unary();
+            expr = make_expr_unary(EXPR_DEREF, expr);
+        } break;
+
+        case TOK_AMPERSAND:
+        {
+            tok_next();
+            expr = parse_expr_unary();
+            expr = make_expr_unary(EXPR_ADDR_OF, expr);
         } break;
 
         default:
@@ -1194,7 +1288,7 @@ parse_expr_binary(int precedence)
 
         switch(tok.kind)
         {
-            case TOK_STAR:    { l = make_expr_binary(EXPR_MUL, l, r); } break;
+            case TOK_ASTERISK:{ l = make_expr_binary(EXPR_MUL, l, r); } break;
             case TOK_SLASH:   { l = make_expr_binary(EXPR_DIV, l, r); } break;
             case TOK_PERCENT: { l = make_expr_binary(EXPR_MOD, l, r); } break;
             case TOK_PLUS:    { l = make_expr_binary(EXPR_ADD, l, r); } break;
@@ -1268,7 +1362,7 @@ parse_type(Type *base_type)
     type = base_type;
 
     tok = tok_peek();
-    while(tok.kind == TOK_STAR)
+    while(tok.kind == TOK_ASTERISK)
     {
         tok_next();
         type = type_ptr(type);
@@ -1569,7 +1663,7 @@ semantic_fatal(char *fmt, ...)
 }
 
 Type *
-eval_expr_type(Expr *expr)
+resolve_expr_type(Expr *expr)
 {
     Type *type = 0;
     Type *type1;
@@ -1625,15 +1719,24 @@ eval_expr_type(Expr *expr)
 
                 type = sym->type->base_type;
             }
+            else if(expr->kind == EXPR_DEREF)
+            {
+                type = resolve_expr_type(expr->l);
+                type = type->base_type;
+            }
+            else if(expr->kind == EXPR_ADDR_OF)
+            {
+                type = type_ptr(resolve_expr_type(expr->l));
+            }
             else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
             {
-                type = eval_expr_type(expr->l);
+                type = resolve_expr_type(expr->l);
             }
             else if((expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END) ||
                     expr->kind == EXPR_ASSIGN)
             {
-                type1 = eval_expr_type(expr->l);
-                type2 = eval_expr_type(expr->r);
+                type1 = resolve_expr_type(expr->l);
+                type2 = resolve_expr_type(expr->r);
                 if(type1 == type_void() || type2 == type_void())
                 {
                     semantic_fatal("Invalid expression type (void in expr)");
@@ -1686,6 +1789,7 @@ check_expr(Expr *expr)
 {
     int res = 0;
     Sym *sym;
+    Type *type;
 
     switch(expr->kind)
     {
@@ -1696,12 +1800,12 @@ check_expr(Expr *expr)
             {
                 semantic_fatal("Invalid symbol %s", expr->id);
             }
-            res = (eval_expr_type(expr) != 0);
+            res = (resolve_expr_type(expr) != 0);
         } break;
 
         case EXPR_INTLIT:
         {
-            res = (eval_expr_type(expr) != 0);
+            res = (resolve_expr_type(expr) != 0);
         } break;
 
         default:
@@ -1723,23 +1827,39 @@ check_expr(Expr *expr)
                     semantic_fatal("Invalid function call: %s is not a function", sym->id);
                 }
 
-                res = (eval_expr_type(expr) != 0);
+                res = (resolve_expr_type(expr) != 0);
             }
             else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
             {
-                res = check_expr(expr->l) && eval_expr_type(expr);
+                if(expr->kind == EXPR_INC_PRE || expr->kind == EXPR_DEC_PRE)
+                {
+                    res = (check_lvalue(expr->l) && resolve_expr_type(expr) != 0);
+                }
+                else if(expr->kind == EXPR_DEREF)
+                {
+                    type = resolve_expr_type(expr->l);
+                    res = (type != 0 && type->kind == TYPE_PTR);
+                }
+                else if(expr->kind == EXPR_ADDR_OF)
+                {
+                    res = check_lvalue(expr->l);
+                }
+                else
+                {
+                    res = check_expr(expr->l) && resolve_expr_type(expr);
+                }
             }
             else if(expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END)
             {
                 res = (check_expr(expr->l) &&
                        check_expr(expr->r) &&
-                       eval_expr_type(expr) != 0);
+                       resolve_expr_type(expr) != 0);
             }
             else if(expr->kind == EXPR_ASSIGN)
             {
                 res = (check_lvalue(expr->l) &&
                        check_expr(expr->r) &&
-                       eval_expr_type(expr) != 0);
+                       resolve_expr_type(expr) != 0);
             }
             else
             {
@@ -1942,10 +2062,17 @@ expr_is_atom(Expr *expr)
     {
         return(1);
     }
-    else
+    return(0);
+}
+
+int
+expr_is_lvalue(Expr *expr)
+{
+    if(expr->kind == EXPR_ID || expr->kind == EXPR_DEREF)
     {
-        return(0);
+        return(1);
     }
+    return(0);
 }
 
 char *
@@ -1965,7 +2092,7 @@ store_expr_temp_var(Expr *expr, int first)
     {
         res = tmp_var();
         stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(eval_expr_type(expr), res);
+        stmt->u.decl = make_decl(resolve_expr_type(expr), res);
         add_stmt(stmt);
     }
 
@@ -2012,6 +2139,35 @@ store_expr_temp_var(Expr *expr, int first)
 
         rvalue = make_expr_binary(EXPR_CALL, l, args);
     }
+    else if(expr->kind == EXPR_INC_PRE || expr->kind == EXPR_DEC_PRE)
+    {
+        /* TODO: Assert that the operand is an identifier (for now) */
+        assert(expr->l->kind == EXPR_ID);
+
+        rvalue = 0;
+        if(expr->kind == EXPR_INC_PRE)
+        {
+            rvalue = make_expr_binary(EXPR_ADD, expr->l, make_expr_intlit(1));
+        }
+        else
+        {
+            rvalue = make_expr_binary(EXPR_SUB, expr->l, make_expr_intlit(1));
+        }
+        rvalue = make_expr_binary(EXPR_ASSIGN, expr->l, rvalue);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = rvalue;
+        add_stmt(stmt);
+
+        rvalue = expr->l;
+    }
+    else if(expr->kind == EXPR_DEREF)
+    {
+        /* TODO: Assert that the operand is an identifier (for now) */
+        assert(expr->l->kind == EXPR_ID);
+
+        rvalue = make_expr_unary(expr->kind, expr->l);
+    }
     else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
     {
         if(expr_is_atom(expr->l))
@@ -2022,17 +2178,32 @@ store_expr_temp_var(Expr *expr, int first)
         {
             l = make_expr_id(store_expr_temp_var(expr->l, 0));
         }
-        rvalue = make_expr_binary(expr->kind, l, expr->r);
+
+        rvalue = make_expr_unary(expr->kind, l);
     }
     else if(expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END)
     {
-        if(expr_is_atom(expr->l))
+        if(expr->kind == EXPR_ASSIGN)
         {
-            l = expr->l;
+            if(expr_is_lvalue(expr->l))
+            {
+                l = expr->l;
+            }
+            else
+            {
+                fatal("Invalid lvalue");
+            }
         }
         else
         {
-            l = make_expr_id(store_expr_temp_var(expr->l, 0));
+            if(expr_is_atom(expr->l))
+            {
+                l = expr->l;
+            }
+            else
+            {
+                l = make_expr_id(store_expr_temp_var(expr->l, 0));
+            }
         }
 
         if(expr_is_atom(expr->r))
@@ -2225,6 +2396,8 @@ lbl_gen(char *lbl)
     ++lbl_count;
 }
 
+void compile_expr(FILE *fout, Expr *expr);
+
 void
 compile_lvalue(FILE *fout, Expr *expr)
 {
@@ -2240,19 +2413,21 @@ compile_lvalue(FILE *fout, Expr *expr)
                 fatal("Invalid symbol %s", expr->id);
             }
 
-            /* TODO: Only ints for now */
-            assert(sym->type == type_int());
-
             if(sym->global)
             {
                 fprintf(fout, "\tmovl %s,%%eax\n", sym->id);
             }
             else
             {
-                /*fprintf(fout, "\tmovl %d(%%ebp),%%eax\n", sym->offset);*/
                 fprintf(fout, "\tmovl %%ebp,%%eax\n");
                 fprintf(fout, "\taddl $%d,%%eax\n", sym->offset);
             }
+        } break;
+
+        case EXPR_DEREF:
+        {
+            compile_lvalue(fout, expr->l);
+            fprintf(fout, "\tmovl (%%eax),%%eax\n");
         } break;
 
         default:
@@ -2283,9 +2458,6 @@ compile_expr(FILE *fout, Expr *expr)
             {
                 fatal("Invalid symbol %s", expr->id);
             }
-
-            /* TODO: Only ints for now */
-            assert(sym->type == type_int());
 
             if(sym->global)
             {
@@ -2332,6 +2504,23 @@ compile_expr(FILE *fout, Expr *expr)
             {
                 fatal("We don't handle \"complex\" function calls");
             }
+        } break;
+
+        case EXPR_DEREF:
+        {
+            compile_expr(fout, expr->l);
+            fprintf(fout, "\tmovl (%%eax),%%eax\n");
+        } break;
+
+        case EXPR_ADDR_OF:
+        {
+            compile_lvalue(fout, expr->l);
+        } break;
+
+        case EXPR_NEG:
+        {
+            compile_expr(fout, expr->l);
+            fprintf(fout, "\tnegl %%eax\n");
         } break;
 
         case EXPR_MUL:
@@ -2564,16 +2753,14 @@ main(int argc, char *argv[])
 
     fout = fopen("a.out.asm", "w");
 
-    src = "int globalvar;\n"
-          "int putchar(int c);\n"
-          "int foo() { return 66; }\n"
+    src = "int putchar(int c);\n"
           "int main() {\n"
-          "    putchar(104);\n"
-          "    putchar(101);\n"
-          "    putchar(108);\n"
-          "    putchar(108);\n"
-          "    putchar(111);\n"
-          "    return foo();\n"
+          "    int *p;\n"
+          "    int a;\n"
+          "    a = 66;\n"
+          "    p = &a;\n"
+          "    *p = 30;\n"
+          "    return a;\n"
           "}";
     parser_init(src);
     unit = parse_unit();
