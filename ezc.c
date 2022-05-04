@@ -1836,8 +1836,11 @@ check_glob_decl(GlobDecl *decl)
             sym = sym_add(decl->id, decl->type);
             sym->global = 1;
 
-            func_var_offset = -4;
-            res = check_stmt(decl->func_def);
+            if(decl->func_def)
+            {
+                func_var_offset = -4;
+                res = check_stmt(decl->func_def);
+            }
         } break;
 
         default:
@@ -2501,7 +2504,8 @@ compile_unit(FILE *fout, GlobDecl *unit)
     GlobDecl *curr;
 #ifdef DEBUG
     FILE *flibc;
-    char curr;
+    char ch;
+    FuncParam *params;
 #endif
 
     sym_reset();
@@ -2520,16 +2524,18 @@ compile_unit(FILE *fout, GlobDecl *unit)
     flibc = fopen("libc.asm", "r");
     if(flibc)
     {
-        curr = (char)fgetc(flibc);
-        while(curr != EOF)
+        ch = (char)fgetc(flibc);
+        while(ch != EOF)
         {
-            fprintf(fout, "%c", curr);
-            curr = (char)fgetc(flibc);
+            fprintf(fout, "%c", ch);
+            ch = (char)fgetc(flibc);
         }
         fclose(flibc);
     }
 
-    sym_add(str_intern("putchar"), type_func(type_int(), ));
+    params = make_func_param(str_intern("c"), type_int());
+    params->next = 0;
+    sym_add(str_intern("putchar"), type_func(type_int(), params));
 #else
     /* TODO: Hardcode libc into a C string */
 #endif
@@ -2549,8 +2555,6 @@ compile_unit(FILE *fout, GlobDecl *unit)
 
 #include <assert.h>
 
-#define PRINT 1
-
 int
 main(int argc, char *argv[])
 {
@@ -2562,19 +2566,24 @@ main(int argc, char *argv[])
 
     src = "int globalvar;\n"
           "int putchar(int c);\n"
-          "int foo() { return 69; }\n"
+          "int foo() { return 66; }\n"
           "int main() {\n"
+          "    putchar(104);\n"
+          "    putchar(101);\n"
+          "    putchar(108);\n"
+          "    putchar(108);\n"
+          "    putchar(111);\n"
           "    return foo();\n"
           "}";
     parser_init(src);
     unit = parse_unit();
     check_unit(unit);
-#if PRINT
+#ifdef PRINT
     print_unit(unit);
     printf("\n\n+++++++++++++++\nIRC\n+++++++++++++++\n\n");
 #endif
     unit = unit_to_irc(unit);
-#if PRINT
+#ifdef PRINT
     print_unit(unit);
     printf("\n\n+++++++++++++++\nx86\n+++++++++++++++\n\n");
 #endif
