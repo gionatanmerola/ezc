@@ -3,8 +3,14 @@
 /******************************************************************************/
 
 /*
- * [ ] Semantic Analysis
- * [ ] AST to IR-C
+ * [x] Better types system
+ * [x] Type check
+ * [x] Type inference
+ * [ ] Code generation based on type width
+ * [ ] Arrays
+ * [ ] Structs
+ * [ ] Finite types
+ * [ ] Function prototypes
  */
 
 /******************************************************************************/
@@ -236,6 +242,12 @@ type_int()
     return(&_type_int);
 }
 
+int
+type_is_arithmetic(Type *type)
+{
+    return(type == type_char() || type == type_int());
+}
+
 #define TYPE_PTR_CACHE_SIZE 1000
 Type type_ptr_cache[TYPE_PTR_CACHE_SIZE];
 int type_ptr_cache_count = 0;
@@ -302,12 +314,6 @@ typedef struct
 Sym sym_table[SYM_TABLE_SIZE];
 int sym_table_count = 0;
 
-void
-sym_reset()
-{
-    sym_table_count = 0;
-}
-
 Sym *
 sym_add(char *id, Type *type)
 {
@@ -349,6 +355,13 @@ init_builtin_sym()
 {
     /* TODO: This is a type function not int */
     sym_add("putchar", type_int());
+}
+
+void
+sym_reset()
+{
+    sym_table_count = 0;
+    init_builtin_sym();
 }
 
 /******************************************************************************/
@@ -813,6 +826,8 @@ int source_line;
 
 int func_var_offset;
 
+char *kword_void;
+char *kword_char;
 char *kword_int;
 char *kword_return;
 char *kword_if;
@@ -851,6 +866,8 @@ parser_init(char *src)
     source = src;
     source_line = 1;
 
+    kword_void = str_intern("void");
+    kword_char = str_intern("char");
     kword_int = str_intern("int");
     kword_return = str_intern("return");
     kword_if = str_intern("if");
@@ -887,7 +904,10 @@ enum
 
     TOK_BIN_OP_END,
 
+    TOK_KW_VOID,
+    TOK_KW_CHAR,
     TOK_KW_INT,
+
     TOK_KW_RETURN,
     TOK_KW_IF,
 
@@ -952,7 +972,9 @@ _tok_next(int update_source)
 
                 tok.id = str_intern(buff);
 
-                if(tok.id == kword_int) { tok.kind = TOK_KW_INT; }
+                     if(tok.id == kword_void) { tok.kind = TOK_KW_VOID; }
+                else if(tok.id == kword_char) { tok.kind = TOK_KW_CHAR; }
+                else if(tok.id == kword_int) { tok.kind = TOK_KW_INT; }
                 else if(tok.id == kword_return) { tok.kind = TOK_KW_RETURN; }
                 else if(tok.id == kword_if) { tok.kind = TOK_KW_IF; }
             } break;
@@ -1052,6 +1074,8 @@ tok_is_type(Token tok)
 
     switch(tok.kind)
     {
+        case TOK_KW_VOID:
+        case TOK_KW_CHAR:
         case TOK_KW_INT:
         {
             is_type = 1;
@@ -1343,6 +1367,18 @@ get_base_type()
     tok = tok_peek();
     switch(tok.kind)
     {
+        case TOK_KW_VOID:
+        {
+            tok_next();
+            type = type_void();
+        } break;
+
+        case TOK_KW_CHAR:
+        {
+            tok_next();
+            type = type_char();
+        } break;
+
         case TOK_KW_INT:
         {
             tok_next();
@@ -1662,29 +1698,21 @@ semantic_fatal(char *fmt, ...)
     exit(1);
 }
 
+Sym *curr_func;
+
 Type *
-resolve_expr_type(Expr *expr)
+resolve_expr_type(Expr *expr, Type *wanted)
 {
     Type *type = 0;
-    Type *type1;
-    Type *type2;
     Sym *sym;
+    Type *lt;
+    Type *rt;
 
     switch(expr->kind)
     {
-        case EXPR_ID:
-        {
-            sym = sym_get(expr->id);
-            if(!sym)
-            {
-                semantic_fatal("Invalid symbol %s", expr->id);
-            }
-            type = sym->type;
-        } break;
-
         case EXPR_INTLIT:
         {
-            if(expr->value < 256)
+            if(wanted && wanted == type_char())
             {
                 type = type_char();
             }
@@ -1694,77 +1722,78 @@ resolve_expr_type(Expr *expr)
             }
         } break;
 
+        case EXPR_ID:
+        {
+            sym = sym_get(expr->id);
+            if(!sym)
+            {
+                semantic_fatal("Invalid symbol %s in expression", expr->id);
+            }
+            type = sym->type;
+        } break;
+
+        case EXPR_CALL:
+        {
+            type = resolve_expr_type(expr->l, wanted);
+            type = type->base_type;
+        } break;
+
         default:
         {
             if(expr->kind == EXPR_CALL)
             {
-                if(expr->l->kind != EXPR_ID)
-                {
-                    semantic_fatal("Invalid function call");
-                }
-
-                sym = sym_get(expr->l->id);
-                if(!sym)
-                {
-                    semantic_fatal("Invalid symbol %s", expr->l->id);
-                }
-                if(!sym->global)
-                {
-                    semantic_fatal("Invalid function call: %s not a global symbol", sym->id);
-                }
-                if(sym->type->kind != TYPE_FUNC)
-                {
-                    semantic_fatal("Invalid function call: %s is not a function", sym->id);
-                }
-
-                type = sym->type->base_type;
+                type = resolve_expr_type(expr->l, wanted);
+                type = type->base_type;
             }
             else if(expr->kind == EXPR_DEREF)
             {
-                type = resolve_expr_type(expr->l);
+                type = resolve_expr_type(expr->l, wanted);
                 type = type->base_type;
             }
             else if(expr->kind == EXPR_ADDR_OF)
             {
-                type = type_ptr(resolve_expr_type(expr->l));
+                type = resolve_expr_type(expr->l, wanted);
+                type = type_ptr(type);
             }
             else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
             {
-                type = resolve_expr_type(expr->l);
+                type = resolve_expr_type(expr->l, wanted);
             }
-            else if((expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END) ||
-                    expr->kind == EXPR_ASSIGN)
+            else if(expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END)
             {
-                type1 = resolve_expr_type(expr->l);
-                type2 = resolve_expr_type(expr->r);
-                if(type1 == type_void() || type2 == type_void())
+                lt = resolve_expr_type(expr->l, wanted);
+                rt = resolve_expr_type(expr->l, lt);
+
+                if(lt->kind == TYPE_PTR && (rt == type_char() || rt == type_int()))
                 {
-                    semantic_fatal("Invalid expression type (void in expr)");
+                    type = lt;
+                }
+                else if(rt->kind == TYPE_PTR && (lt == type_char() || lt == type_int()))
+                {
+                    type = rt;
+                }
+                else if(lt != rt)
+                {
+                    semantic_fatal("Cannot operate on 2 different types");
                 }
 
-                if((type1 == type_int() && type2 == type_int()) ||
-                   (type1 == type_int() && type2 == type_char()) ||
-                   (type1 == type_char() && type2 == type_int()))
-                {
-                    type = type_int();
-                }
-                else if(type1 == type_char() && type2 == type_char())
-                {
-                    type = type_char();
-                }
-
-                /* TODO: Pointers */
+                type = lt;
             }
             else
             {
-                semantic_fatal("Invalid expression type");
+                assert(0);
             }
         } break;
     }
 
     if(!type)
     {
-        semantic_fatal("Invalid expression type (no type)");
+        semantic_fatal("Invalid expression type");
+    }
+
+    if(type && wanted && type == type_char() && wanted == type_int())
+    {
+        type = type_int();
     }
 
     return(type);
@@ -1775,158 +1804,182 @@ check_lvalue(Expr *expr)
 {
     int res = 0;
 
-    if(expr->kind != EXPR_ID)
+    if(expr->kind == EXPR_ID)
     {
-        semantic_fatal("Invalid lvalue");
+        res = 1;
+    }
+    else if(expr->kind == EXPR_DEREF)
+    {
+        res = 1;
     }
 
-    res = 1;
     return(res);
 }
 
-int
+void
 check_expr(Expr *expr)
 {
-    int res = 0;
-    Sym *sym;
     Type *type;
+    Type *lt;
+    Type *rt;
 
     switch(expr->kind)
     {
+        case EXPR_INTLIT:
         case EXPR_ID:
         {
-            sym = sym_get(expr->id);
-            if(!sym)
-            {
-                semantic_fatal("Invalid symbol %s", expr->id);
-            }
-            res = (resolve_expr_type(expr) != 0);
+            /* Nothing */
         } break;
 
-        case EXPR_INTLIT:
+        case EXPR_CALL:
         {
-            res = (resolve_expr_type(expr) != 0);
+            type = resolve_expr_type(expr->l, 0);
+            if(type->kind != TYPE_FUNC &&
+               type->kind != TYPE_PTR &&
+               type->base_type->kind != TYPE_FUNC)
+            {
+                semantic_fatal("Invalid function call");
+            }
+        } break;
+
+        case EXPR_INC_PRE:
+        {
+            if(!check_lvalue(expr->l))
+            {
+                semantic_fatal("Invalid lvalue (operand of pre-increment '++')");
+            }
+        } break;
+
+        case EXPR_DEC_PRE:
+        {
+            if(!check_lvalue(expr->l))
+            {
+                semantic_fatal("Invalid lvalue (operand of pre-decrement '--')");
+            }
+        } break;
+
+        case EXPR_NEG:
+        {
+            lt = resolve_expr_type(expr->l, 0);
+
+            if(!type_is_arithmetic(lt))
+            {
+                semantic_fatal("Invalid arithmetic expression operand");
+            }
+        } break;
+
+        case EXPR_DEREF:
+        {
+            type = resolve_expr_type(expr->l, 0);
+            if(type->kind != TYPE_PTR)
+            {
+                semantic_fatal("Invalid pointer for dereference");
+            }
+        } break;
+
+        case EXPR_ADDR_OF:
+        {
+            if(!check_lvalue(expr->l))
+            {
+                semantic_fatal("Invalid lvalue (operand of unary '&')");
+            }
+        } break;
+
+        case EXPR_ASSIGN:
+        {
+            if(!check_lvalue(expr->l))
+            {
+                semantic_fatal("Invalid lvalue (left operand of assignment)");
+            }
+        } break;
+
+        case EXPR_MUL:
+        case EXPR_DIV:
+        case EXPR_MOD:
+        case EXPR_ADD:
+        case EXPR_SUB:
+        {
+            lt = resolve_expr_type(expr->l, 0);
+            rt = resolve_expr_type(expr->r, lt);
+
+            if((!type_is_arithmetic(lt) && lt->kind != TYPE_PTR) ||
+               (!type_is_arithmetic(rt) && rt->kind != TYPE_PTR))
+            {
+                semantic_fatal("Invalid arithmetic expression operand");
+            }
         } break;
 
         default:
         {
-            if(expr->kind == EXPR_CALL)
-            {
-                if(expr->l->kind != EXPR_ID)
-                {
-                    semantic_fatal("Invalid function call");
-                }
-
-                sym = sym_get(expr->l->id);
-                if(!sym->global)
-                {
-                    semantic_fatal("Invalid function call: %s not a global symbol", sym->id);
-                }
-                if(sym->type->kind != TYPE_FUNC)
-                {
-                    semantic_fatal("Invalid function call: %s is not a function", sym->id);
-                }
-
-                res = (resolve_expr_type(expr) != 0);
-            }
-            else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
-            {
-                if(expr->kind == EXPR_INC_PRE || expr->kind == EXPR_DEC_PRE)
-                {
-                    res = (check_lvalue(expr->l) && resolve_expr_type(expr) != 0);
-                }
-                else if(expr->kind == EXPR_DEREF)
-                {
-                    type = resolve_expr_type(expr->l);
-                    res = (type != 0 && type->kind == TYPE_PTR);
-                }
-                else if(expr->kind == EXPR_ADDR_OF)
-                {
-                    res = check_lvalue(expr->l);
-                }
-                else
-                {
-                    res = check_expr(expr->l) && resolve_expr_type(expr);
-                }
-            }
-            else if(expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END)
-            {
-                res = (check_expr(expr->l) &&
-                       check_expr(expr->r) &&
-                       resolve_expr_type(expr) != 0);
-            }
-            else if(expr->kind == EXPR_ASSIGN)
-            {
-                res = (check_lvalue(expr->l) &&
-                       check_expr(expr->r) &&
-                       resolve_expr_type(expr) != 0);
-            }
-            else
-            {
-                res = 0;
-            }
+            assert(0);
         } break;
     }
 
-    return(res);
+    resolve_expr_type(expr, 0);
 }
 
-int
+void
 check_stmt(Stmt *stmt)
 {
-    int res = 0;
-    Sym *sym;
+    Type *type;
     Decl *decl;
     Stmt *curr;
+    Sym *sym;
 
     switch(stmt->kind)
     {
         case STMT_DECL:
         {
             decl = stmt->u.decl;
-            sym = sym_get(decl->id);
-            if(sym)
-            {
-                semantic_fatal("Symbol '%s' already declared", decl->id);
-            }
 
             sym = sym_add(decl->id, decl->type);
             sym->global = 0;
             sym->offset = func_var_offset;
             func_var_offset -= decl->type->size;
-
-            res = 1;
         } break;
 
         case STMT_EXPR:
         {
-            res = check_expr(stmt->u.expr);
+            check_expr(stmt->u.expr);
         } break;
 
         case STMT_BLOCK:
         {
-            res = 1;
             curr = stmt->u.block;
             while(curr)
             {
-                res = res && check_stmt(curr);
+                check_stmt(curr);
                 curr = curr->next;
+            }
+        } break;
+
+        case STMT_RET:
+        {
+            if(stmt->u.expr)
+            {
+                type = resolve_expr_type(stmt->u.expr, curr_func->type->base_type);
+            }
+            else
+            {
+                type = type_void();
+            }
+
+            if(type != curr_func->type->base_type)
+            {
+                semantic_fatal("Return expression does not match function return type");
             }
         } break;
 
         default:
         {
-            res = 0;
+            assert(0);
         } break;
     }
-
-    return(res);
 }
 
-int
+void
 check_glob_decl(GlobDecl *decl)
 {
-    int res = 0;
     Sym *sym;
 
     switch(decl->kind)
@@ -1936,13 +1989,11 @@ check_glob_decl(GlobDecl *decl)
             sym = sym_get(decl->id);
             if(sym)
             {
-                semantic_fatal("Symbol '%s' already declared", decl->id);
+                semantic_fatal("Global variable '%s' already declared", decl->id);
             }
 
             sym = sym_add(decl->id, decl->type);
             sym->global = 1;
-
-            res = 1;
         } break;
 
         case GLOB_DECL_FUNC:
@@ -1950,44 +2001,41 @@ check_glob_decl(GlobDecl *decl)
             sym = sym_get(decl->id);
             if(sym)
             {
-                semantic_fatal("Symbol '%s' already declared", decl->id);
+                semantic_fatal("Function '%s' already declared", decl->id);
             }
 
             sym = sym_add(decl->id, decl->type);
             sym->global = 1;
 
+            curr_func = sym;
+
             if(decl->func_def)
             {
                 func_var_offset = -4;
-                res = check_stmt(decl->func_def);
+                check_stmt(decl->func_def);
             }
         } break;
 
         default:
         {
-            res = 0;
+            assert(0);
         } break;
     }
-
-    return(res);
 }
 
-int
+void
 check_unit(GlobDecl *unit)
 {
-    int res = 1;
     GlobDecl *curr;
 
-    init_builtin_sym();
+    sym_reset();
 
     curr = unit;
     while(curr)
     {
-        res = res && check_glob_decl(curr);
+        check_glob_decl(curr);
         curr = curr->next;
     }
-
-    return(res);
 }
 
 /******************************************************************************/
@@ -2092,7 +2140,7 @@ store_expr_temp_var(Expr *expr, int first)
     {
         res = tmp_var();
         stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(resolve_expr_type(expr), res);
+        stmt->u.decl = make_decl(resolve_expr_type(expr, 0), res);
         add_stmt(stmt);
     }
 
@@ -2737,6 +2785,12 @@ compile_unit(FILE *fout, GlobDecl *unit)
     }
 }
 
+/************************************************/
+/************************************************/
+/**                 SCRATCHPAD                 **/
+/************************************************/
+/************************************************/
+
 #if 0
 #define ASMORG_API
 #include "asmorg.c"
@@ -2759,7 +2813,7 @@ main(int argc, char *argv[])
           "    int a;\n"
           "    a = 66;\n"
           "    p = &a;\n"
-          "    *p = 30;\n"
+          "    *p = 38;\n"
           "    return a;\n"
           "}";
     parser_init(src);
