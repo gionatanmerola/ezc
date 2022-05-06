@@ -5,8 +5,10 @@
 /*
  * [x] Better types system
  * [x] Type check
+ * [x] Type check of arguments on function call
  * [x] Type inference
- * [ ] Code generation based on type width
+ * [x] Code generation based on type width
+ * [ ] Code generation larger width than 4 bytes
  * [ ] Arrays
  * [ ] Structs
  * [ ] Finite types
@@ -20,6 +22,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+
+#define ALIGN(n, a) ((((n)%(a))>0)?((n)+((a)-((n)%(a)))):0)
 
 #define MALLOC_TYPE(_Type_) ((_Type_ *)malloc(sizeof(_Type_)))
 #define DUP_OBJ(_Type_, dest, src)\
@@ -353,8 +357,10 @@ sym_get(char *id)
 void
 init_builtin_sym()
 {
+#if 0
     /* TODO: This is a type function not int */
     sym_add("putchar", type_int());
+#endif
 }
 
 void
@@ -1588,6 +1594,7 @@ parse_glob_decl()
     else
     {
         params = 0;
+        curr_param = 0;
 
         tok_expect(TOK_LPAREN);
         tok = tok_peek();
@@ -1823,6 +1830,9 @@ check_expr(Expr *expr)
     Type *lt;
     Type *rt;
 
+    Expr *arg;
+    FuncParam *param;
+
     switch(expr->kind)
     {
         case EXPR_INTLIT:
@@ -1839,6 +1849,36 @@ check_expr(Expr *expr)
                type->base_type->kind != TYPE_FUNC)
             {
                 semantic_fatal("Invalid function call");
+            }
+            if(type->kind == TYPE_PTR)
+            {
+                type = type->base_type;
+            }
+
+            arg = expr->r;
+            param = type->params;
+
+            if((arg != 0 && param == 0) ||
+               (arg == 0 && param != 0))
+            {
+                semantic_fatal("Invalid number of arguments in function call");
+            }
+            while(arg)
+            {
+                lt = param->type;
+                rt = resolve_expr_type(arg, lt);
+                if(lt != rt)
+                {
+                    semantic_fatal("Invalid type of argument in function call");
+                }
+
+                arg = arg->next;
+                param = param->next;
+                if((arg != 0 && param == 0) ||
+                   (arg == 0 && param != 0))
+                {
+                    semantic_fatal("Invalid number of arguments in function call");
+                }
             }
         } break;
 
@@ -1931,6 +1971,11 @@ check_stmt(Stmt *stmt)
         case STMT_DECL:
         {
             decl = stmt->u.decl;
+
+            if(decl->type == type_void())
+            {
+                semantic_fatal("You cannot declare a void type variable");
+            }
 
             sym = sym_add(decl->id, decl->type);
             sym->global = 0;
@@ -2480,7 +2525,7 @@ compile_lvalue(FILE *fout, Expr *expr)
 
         default:
         {
-            fatal("Invalid lvalue");
+            assert(0);
         } break;
     }
 }
@@ -2490,7 +2535,11 @@ compile_expr(FILE *fout, Expr *expr)
 {
     Sym *sym = 0;
     Expr *arg;
+    FuncParam *param;
     int argc;
+    int params_size;
+    Type *type;
+    char *ins;
 
     switch(expr->kind)
     {
@@ -2507,14 +2556,31 @@ compile_expr(FILE *fout, Expr *expr)
                 fatal("Invalid symbol %s", expr->id);
             }
 
-            if(sym->global)
+            if(sym->type->size == 1)
             {
-                fprintf(fout, "\tmovl %s,%%ebx\n", sym->id);
-                fprintf(fout, "\tmovl (%%ebx),%%eax\n");
+                ins = "movzbl";
+            }
+            else if(sym->type->size == 2)
+            {
+                ins = "movzwl";
+            }
+            else if(sym->type->size == 4)
+            {
+                ins = "movl";
             }
             else
             {
-                fprintf(fout, "\tmovl %d(%%ebp),%%eax\n", sym->offset);
+                assert(0);
+            }
+
+            if(sym->global)
+            {
+                fprintf(fout, "\tmovl %s,%%ebx\n", sym->id);
+                fprintf(fout, "\t%s (%%ebx),%%eax\n", ins);
+            }
+            else
+            {
+                fprintf(fout, "\t%s %d(%%ebp),%%eax\n", ins, sym->offset);
             }
         } break;
 
@@ -2532,19 +2598,24 @@ compile_expr(FILE *fout, Expr *expr)
 
                 argc = 0;
                 arg = expr->r;
+                params_size = 0;
+                param = curr_func->type->params;
                 while(arg)
                 {
                     ++argc;
                     compile_expr(fout, arg);
+                    /* TODO: Push based on args sizes */
                     fprintf(fout, "\tpushl %%eax\n");
+                    params_size += ALIGN(param->type->size, 4);
                     arg = arg->next;
+                    param = param->next;
                 }
 
                 fprintf(fout, "\tcall %s\n", expr->l->id);
 
                 while(argc > 0)
                 {
-                    fprintf(fout, "\tpopl %%eax\n");
+                    fprintf(fout, "\taddl $%d,%%esp\n", params_size);
                     --argc;
                 }
             }
@@ -2584,6 +2655,7 @@ compile_expr(FILE *fout, Expr *expr)
             compile_expr(fout, expr->r);
             fprintf(fout, "\tmovl %%eax,%%ecx\n");
             compile_expr(fout, expr->l);
+            fprintf(fout, "\tcltd\n");
             fprintf(fout, "\tidivl %%ecx\n");
         } break;
 
@@ -2605,30 +2677,33 @@ compile_expr(FILE *fout, Expr *expr)
 
         case EXPR_ASSIGN:
         {
-            compile_expr(fout, expr->r);
-            if(0 && expr->l->kind == EXPR_ID)
+            type = resolve_expr_type(expr, 0);
+            if(type->size == 1)
             {
-                sym = sym_get(expr->l->id);
-                if(sym->global)
-                {
-                    fprintf(fout, "\tmovl %%eax,%s\n", expr->l->id);
-                }
-                else
-                {
-                    fprintf(fout, "\tmovl %%eax,%d(%%ebp)\n", sym->offset);
-                }
+                ins = "movb";
+            }
+            else if(type->size == 2)
+            {
+                ins = "movw";
+            }
+            else if(type->size == 4)
+            {
+                ins = "movl";
             }
             else
             {
-                fprintf(fout, "\tmovl %%eax,%%ecx\n");
-                compile_lvalue(fout, expr->l);
-                fprintf(fout, "\tmovl %%ecx,(%%eax)\n");
+                assert(0);
             }
+
+            compile_expr(fout, expr->r);
+            fprintf(fout, "\tmovl %%eax,%%ecx\n");
+            compile_lvalue(fout, expr->l);
+            fprintf(fout, "\t%s %%ecx,(%%eax)\n", ins);
         } break;
 
         default:
         {
-            fatal("Invalid expression");
+            assert(0);
         } break;
     }
 }
@@ -2637,9 +2712,12 @@ void
 compile_decl(FILE *fout, Decl *decl)
 {
     Sym *sym;
+    int size;
 
     assert(decl->type && decl->type->size > 0);
-    fprintf(fout, "\tsubl $%d,%%esp\n", decl->type->size);
+
+    size = ALIGN(decl->type->size, 4);
+    fprintf(fout, "\tsubl $%d,%%esp\n", size);
 
     sym = sym_add(decl->id, decl->type);
     sym->global = 0;
@@ -2698,13 +2776,15 @@ void
 compile_glob_decl(FILE *fout, GlobDecl *decl)
 {
     Sym *sym;
+    int size;
 
     switch(decl->kind)
     {
         case GLOB_DECL_VAR:
         {
+            size = ALIGN(decl->type->size, 4);
             fprintf(fout, "%s:\n", decl->id);
-            fprintf(fout, "\t.zero $%d\n", decl->type->size);
+            fprintf(fout, "\t.zero $%d\n", size);
 
             sym = sym_add(decl->id, decl->type);
             sym->global = 1;
@@ -2811,6 +2891,10 @@ main(int argc, char *argv[])
           "int main() {\n"
           "    int *p;\n"
           "    int a;\n"
+#if 0
+          "    char c;\n"
+          "    c = 96;\n"
+#endif
           "    a = 66;\n"
           "    p = &a;\n"
           "    *p = 38;\n"
