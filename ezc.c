@@ -12,9 +12,15 @@
  * [ ] Arrays
  * [ ] Intern array types?
  * [ ] Structs
- * [ ] Finite types
+ * [ ] Finite/Non-finite types
  * [ ] Function prototypes
  * [x] Better AST => IR-C Translation
+ * [x] Post-position of labels
+ * [x] If-Else
+ * [x] While
+ * [ ] Do-While
+ * [ ] For
+ * [ ] Switch
  */
 
 /******************************************************************************/
@@ -345,6 +351,72 @@ type_array(Type *base_type, int length)
 /**                                SYM TABLE                                 **/
 /******************************************************************************/
 
+enum
+{
+    LABEL_UNDEFINED,
+    LABEL_DEFINED,
+
+    LABEL_STATUS_COUNT
+};
+
+typedef struct
+{
+    int status;
+    char *id;
+} Label;
+
+#define LBL_TABLE_SIZE 1000
+Label label_table[LBL_TABLE_SIZE];
+int label_table_count = 0;
+
+Label *
+label_add(char *id)
+{
+    Label *res = 0;
+
+    res = &(label_table[label_table_count]);
+    ++label_table_count;
+    res->id = id;
+    res->status = LABEL_UNDEFINED;
+
+    return(res);
+}
+
+Label *
+label_get(char *id)
+{
+    Label *res = 0;
+    int i;
+
+    for(i = 0;
+        i < label_table_count;
+        ++i)
+    {
+        if(id == label_table[i].id)
+        {
+            res = &(label_table[i]);
+            break;
+        }
+    }
+
+    return(res);
+}
+
+Label *
+label_get_or_add(char *id)
+{
+    Label *res = 0;
+
+    res = label_get(id);
+    if(!res)
+    {
+        res = label_add(id);
+        res->status = LABEL_UNDEFINED;
+    }
+
+    return(res);
+}
+
 typedef struct
 {
     char *id;
@@ -380,6 +452,7 @@ sym_get(char *id)
     Sym *res = 0;
     int i;
 
+    /* TODO: Start from the bottom of the list */
     for(i = 0;
         i < sym_table_count;
         ++i)
@@ -735,6 +808,11 @@ enum
     STMT_EXPR,
     STMT_BLOCK,
     STMT_RET,
+    STMT_LABEL,
+    STMT_GOTO,
+    STMT_IF,
+
+    STMT_WHILE,
 
     STMT_COUNT
 };
@@ -745,10 +823,14 @@ Stmt
     int kind;
     union
     {
+        char *label;
         Decl *decl;
         Expr *expr;
         struct Stmt *block;
     } u;
+    Expr *cond;
+    struct Stmt *then_stmt;
+    struct Stmt *else_stmt;
     struct Stmt *next;
 } Stmt;
 
@@ -773,6 +855,38 @@ dup_stmt(Stmt *stmt)
     Stmt *new;
     new = DUP_OBJ(Stmt, new, stmt);
     return(new);
+}
+
+Stmt *
+make_stmt_if(Expr *cond, Stmt *then_stmt, Stmt *else_stmt)
+{
+    Stmt *res = 0;
+
+    res = make_stmt(STMT_IF);
+    if(res)
+    {
+        res->cond = cond;
+        res->then_stmt = then_stmt;
+        res->else_stmt = else_stmt;
+    }
+
+    return(res);
+}
+
+Stmt *
+make_stmt_while(Expr *cond, Stmt *then_stmt)
+{
+    Stmt *res = 0;
+
+    res = make_stmt(STMT_WHILE);
+    if(res)
+    {
+        res->cond = cond;
+        res->then_stmt = then_stmt;
+        res->else_stmt = 0;
+    }
+
+    return(res);
 }
 
 void
@@ -812,6 +926,45 @@ print_stmt(Stmt *stmt)
             {
                 print_expr(stmt->u.expr);
             }
+            printf(")");
+        } break;
+
+        case STMT_LABEL:
+        {
+            printf("(label %s)", stmt->u.label);
+        } break;
+
+        case STMT_GOTO:
+        {
+            printf("(goto %s)", stmt->u.label);
+        } break;
+
+        case STMT_IF:
+        {
+            printf("(if ");
+            print_expr(stmt->cond);
+            if(stmt->then_stmt)
+            {
+                print_stmt(stmt->then_stmt);
+                if(stmt->else_stmt)
+                {
+                    printf(" else ");
+                    print_stmt(stmt->else_stmt);
+                }
+                printf(")");
+            }
+            else
+            {
+                printf(" goto %s)", stmt->u.label);
+            }
+        } break;
+
+        case STMT_WHILE:
+        {
+            printf("(while ");
+            print_expr(stmt->cond);
+            printf(" ");
+            print_stmt(stmt->then_stmt);
             printf(")");
         } break;
 
@@ -948,7 +1101,10 @@ char *kword_void;
 char *kword_char;
 char *kword_int;
 char *kword_return;
+char *kword_goto;
 char *kword_if;
+char *kword_else;
+char *kword_while;
 
 #include <stdarg.h>
 
@@ -988,7 +1144,10 @@ parser_init(char *src)
     kword_char = str_intern("char");
     kword_int = str_intern("int");
     kword_return = str_intern("return");
+    kword_goto = str_intern("goto");
     kword_if = str_intern("if");
+    kword_else = str_intern("else");
+    kword_while = str_intern("while");
 }
 
 enum
@@ -1032,7 +1191,10 @@ enum
     TOK_KW_INT,
 
     TOK_KW_RETURN,
+    TOK_KW_GOTO,
     TOK_KW_IF,
+    TOK_KW_ELSE,
+    TOK_KW_WHILE,
 
     TOK_COUNT
 };
@@ -1046,12 +1208,30 @@ typedef struct Token
     char *id;
 } Token;
 
+Token putback;
+
+void
+tok_putback(Token tok)
+{
+    putback = tok;
+}
+
 Token
 _tok_next(int update_source)
 {
     Token tok;
     char *src = source;
     int srcl = source_line;
+
+    if(putback.kind != TOK_EOF)
+    {
+        tok = putback;
+        if(update_source)
+        {
+            putback.kind = TOK_EOF;
+        }
+        return(tok);
+    }
 
     if(!*src)
     {
@@ -1099,7 +1279,10 @@ _tok_next(int update_source)
                 else if(tok.id == kword_char) { tok.kind = TOK_KW_CHAR; }
                 else if(tok.id == kword_int) { tok.kind = TOK_KW_INT; }
                 else if(tok.id == kword_return) { tok.kind = TOK_KW_RETURN; }
+                else if(tok.id == kword_goto) { tok.kind = TOK_KW_GOTO; }
                 else if(tok.id == kword_if) { tok.kind = TOK_KW_IF; }
+                else if(tok.id == kword_else) { tok.kind = TOK_KW_ELSE; }
+                else if(tok.id == kword_while) { tok.kind = TOK_KW_WHILE; }
             } break;
 
             case '0':case '1':case '2':case '3':case '4':
@@ -1767,9 +1950,14 @@ parse_decl()
 }
 
 /*
- * <stmt> ::= <decl>
+ * <stmt> ::= <label> ':'
+ *          | <decl>
  *          | <expr>
  *          | <stmt_block>
+ *          | 'return' <expr>? ';'
+ *          | 'goto' <ident> ';'
+ *          | 'if' '(' <expr> ')' <stmt> 'else' <stmt>
+ *          | 'while' '(' <expr> ')' <stmt>
  */
 
 Stmt *parse_stmt();
@@ -1812,6 +2000,11 @@ parse_stmt()
 {
     Stmt *stmt;
     Token tok;
+    Token tok2;
+    char *label;
+    Expr *expr;
+    Stmt *then_stmt;
+    Stmt *else_stmt;
 
     tok = tok_peek();
     while(tok.kind == TOK_SEMI)
@@ -1829,6 +2022,27 @@ parse_stmt()
     {
         switch(tok.kind)
         {
+            case TOK_ID:
+            {
+                label = tok.id;
+                tok_next();
+
+                tok2 = tok_peek();
+                if(tok2.kind == TOK_COLON)
+                {
+                    tok_next();
+                    stmt = make_stmt(STMT_LABEL);
+                    stmt->u.label = label;
+                }
+                else
+                {
+                    tok_putback(tok);
+                    stmt = make_stmt(STMT_EXPR);
+                    stmt->u.expr = parse_expr();
+                    tok_expect(TOK_SEMI);
+                }
+            } break;
+
             case TOK_LBRACE:
             {
                 stmt = parse_stmt_block();
@@ -1845,6 +2059,49 @@ parse_stmt()
                     stmt->u.expr = parse_expr();
                 }
                 tok_expect(TOK_SEMI);
+            } break;
+
+            case TOK_KW_GOTO:
+            {
+                tok_next();
+                tok = tok_expect(TOK_ID);
+                stmt = make_stmt(STMT_GOTO);
+                stmt->u.label = tok.id;
+                tok_expect(TOK_SEMI);
+            } break;
+
+            case TOK_KW_IF:
+            {
+                tok_next();
+
+                tok_expect(TOK_LPAREN);
+                expr = parse_expr();
+                tok_expect(TOK_RPAREN);
+
+                then_stmt = parse_stmt();
+                else_stmt = 0;
+
+                tok = tok_peek();
+                if(tok.kind == TOK_KW_ELSE)
+                {
+                    tok_next();
+                    else_stmt = parse_stmt();
+                }
+
+                stmt = make_stmt_if(expr, then_stmt, else_stmt);
+            } break;
+
+            case TOK_KW_WHILE:
+            {
+                tok_next();
+
+                tok_expect(TOK_LPAREN);
+                expr = parse_expr();
+                tok_expect(TOK_RPAREN);
+
+                then_stmt = parse_stmt();
+
+                stmt = make_stmt_while(expr, then_stmt);
             } break;
 
             default:
@@ -2345,6 +2602,7 @@ check_stmt(Stmt *stmt)
     Decl *decl;
     Stmt *curr;
     Sym *sym;
+    Label *lbl;
 
     switch(stmt->kind)
     {
@@ -2393,6 +2651,44 @@ check_stmt(Stmt *stmt)
             {
                 semantic_fatal("Return expression does not match function return type");
             }
+        } break;
+
+        case STMT_LABEL:
+        {
+            lbl = label_get(stmt->u.label);
+            if(lbl)
+            {
+                if(lbl->status == LABEL_DEFINED)
+                {
+                    semantic_fatal("Cannot redefine the label '%s'", lbl->id);
+                }
+            }
+            else
+            {
+                lbl = label_add(stmt->u.label);
+                lbl->status = LABEL_DEFINED;
+            }
+        } break;
+
+        case STMT_GOTO:
+        {
+            label_get_or_add(stmt->u.label);
+        } break;
+
+        case STMT_IF:
+        {
+            check_expr(stmt->cond);
+            check_stmt(stmt->then_stmt);
+            if(stmt->else_stmt)
+            {
+                check_stmt(stmt->else_stmt);
+            }
+        } break;
+
+        case STMT_WHILE:
+        {
+            check_expr(stmt->cond);
+            check_stmt(stmt->then_stmt);
         } break;
 
         default:
@@ -2452,6 +2748,8 @@ void
 check_unit(GlobDecl *unit)
 {
     GlobDecl *curr;
+    int i;
+    Label *lbl;
 
     sym_reset();
 
@@ -2460,6 +2758,17 @@ check_unit(GlobDecl *unit)
     {
         check_glob_decl(curr);
         curr = curr->next;
+    }
+
+    for(i = 0;
+        i < label_table_count;
+        ++i)
+    {
+        lbl = &(label_table[i]);
+        if(lbl->status != LABEL_DEFINED)
+        {
+            semantic_error("Label '%s' used but not defined", lbl->id);
+        }
     }
 }
 
@@ -2483,6 +2792,27 @@ check_unit(GlobDecl *unit)
  * Sources:
  * [1] https://ls12-www.cs.tu-dortmund.de/daes/media/documents/publications/downloads/2003-samosIII.pdf
  */
+
+int lbl_count = 0;
+
+char *
+lbl_gen()
+{
+    char *res;
+    char lbl[128];
+    int n;
+
+    lbl[0] = '_';
+    lbl[1] = '_';
+    lbl[2] = '_';
+    lbl[3] = 'L';
+    n = sprintf(lbl+4, "%d", lbl_count);
+    lbl[n+4] = 0;
+    ++lbl_count;
+
+    res = str_intern(lbl);
+    return(res);
+}
 
 char tmp_var_buff[64];
 int tmp_vars_count = 0;
@@ -2784,6 +3114,11 @@ stmt_to_irc(Stmt *stmt)
     Stmt *irc_stmt;
     Sym *sym;
 
+    Expr *cond;
+    char *lbl1;
+    char *lbl2;
+    char *lbl3;
+
     switch(stmt->kind)
     {
         case STMT_DECL:
@@ -2827,6 +3162,115 @@ stmt_to_irc(Stmt *stmt)
             {
                 irc_stmt->u.expr = 0;
             }
+            add_stmt(irc_stmt);
+        } break;
+
+        case STMT_LABEL:
+        {
+            irc_stmt = dup_stmt(stmt);
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+        } break;
+
+        case STMT_GOTO:
+        {
+            irc_stmt = dup_stmt(stmt);
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+        } break;
+
+        case STMT_IF:
+        {
+            lbl1 = lbl_gen();
+            lbl2 = lbl_gen();
+            if(stmt->else_stmt)
+            {
+                lbl3 = lbl_gen();
+            }
+
+            cond = reduce_expr_to_atom(stmt->cond);
+
+            irc_stmt = make_stmt_if(cond, 0, 0);
+            irc_stmt->u.label = lbl1;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_GOTO);
+            irc_stmt->u.label = lbl2;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl1;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            stmt_to_irc(stmt->then_stmt);
+
+            irc_stmt = make_stmt(STMT_GOTO);
+            if(stmt->else_stmt)
+            {
+                irc_stmt->u.label = lbl3;
+            }
+            else
+            {
+                irc_stmt->u.label = lbl2;
+            }
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl2;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            if(stmt->else_stmt)
+            {
+                stmt_to_irc(stmt->else_stmt);
+
+                irc_stmt = make_stmt(STMT_LABEL);
+                irc_stmt->u.label = lbl3;
+                irc_stmt->next = 0;
+                add_stmt(irc_stmt);
+            }
+        } break;
+
+        case STMT_WHILE:
+        {
+            lbl1 = lbl_gen();
+            lbl2 = lbl_gen();
+            lbl3 = lbl_gen();
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl1;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            cond = reduce_expr_to_atom(stmt->cond);
+
+            irc_stmt = make_stmt_if(cond, 0, 0);
+            irc_stmt->u.label = lbl2;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_GOTO);
+            irc_stmt->u.label = lbl3;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl2;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            stmt_to_irc(stmt->then_stmt);
+
+            irc_stmt = make_stmt(STMT_GOTO);
+            irc_stmt->u.label = lbl1;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl3;
+            irc_stmt->next = 0;
             add_stmt(irc_stmt);
         } break;
 
@@ -2921,20 +3365,6 @@ unit_to_irc(GlobDecl *unit)
 /******************************************************************************/
 
 #include <assert.h>
-
-int lbl_count = 0;
-
-void
-lbl_gen(char *lbl)
-{
-    int n;
-
-    lbl[0] = '.';
-    lbl[1] = 'L';
-    n = sprintf(lbl+2, "%d", lbl_count);
-    lbl[n+2] = 0;
-    ++lbl_count;
-}
 
 void compile_expr(FILE *fout, Expr *expr);
 
@@ -3151,6 +3581,7 @@ compile_expr(FILE *fout, Expr *expr)
         case EXPR_TERNARY:
         {
             /* TODO: HERE */
+            assert(0);
         } break;
 
         case EXPR_COMPOUND:
@@ -3225,6 +3656,23 @@ compile_stmt(FILE *fout, Stmt *stmt)
             }
             fprintf(fout, "\tleave\n");
             fprintf(fout, "\tret\n");
+        } break;
+
+        case STMT_LABEL:
+        {
+            fprintf(fout, "%s:\n", stmt->u.label);
+        } break;
+
+        case STMT_GOTO:
+        {
+            fprintf(fout, "\tjmp %s\n", stmt->u.label);
+        } break;
+
+        case STMT_IF:
+        {
+            compile_expr(fout, stmt->cond);
+            fprintf(fout, "\tcmpl $0,%%eax\n");
+            fprintf(fout, "\tjne %s\n", stmt->u.label);
         } break;
 
         default:
@@ -3351,22 +3799,12 @@ main(int argc, char *argv[])
 
     src = "int putchar(int c);\n"
           "int main() {\n"
-          "    int *p;\n"
           "    int a;\n"
           "    int b;\n"
-#if 0
-          "    char c;\n"
-          "    c = 96;\n"
-#endif
-          "    a = 66;\n"
-          "    p = &a;\n"
-          "    *p = 38;\n"
-#if 1
-          "    b = (a=0, a=32, 69);\n"
-#else
-          "    b = a = 33;\n"
-#endif
-          "    return b;\n"
+          "    a = -80;\n"
+          "    b = 80;\n"
+          "    while(b) --b;\n"
+          "    return b+4;\n"
           "}";
     parser_init(src);
     unit = parse_unit();
