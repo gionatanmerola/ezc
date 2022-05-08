@@ -12,6 +12,7 @@
  * [ ] Arrays
  * [ ] Intern array types?
  * [ ] Structs
+ * [ ] Unions
  * [ ] Finite/Non-finite types
  * [ ] Function prototypes
  * [x] Better AST => IR-C Translation
@@ -424,6 +425,8 @@ typedef struct
     int global;
     int offset;
     void *func;
+    int is_const;
+    int value;
 } Sym;
 
 #define SYM_TABLE_SIZE 1000
@@ -442,6 +445,8 @@ sym_add(char *id, Type *type)
     res->global = 0;
     res->offset = 0;
     res->func = 0;
+    res->is_const = 0;
+    res->value = 0;
 
     return(res);
 }
@@ -452,10 +457,9 @@ sym_get(char *id)
     Sym *res = 0;
     int i;
 
-    /* TODO: Start from the bottom of the list */
-    for(i = 0;
-        i < sym_table_count;
-        ++i)
+    for(i = sym_table_count - 1;
+        i >= 0;
+        --i)
     {
         if(id == sym_table[i].id)
         {
@@ -1446,8 +1450,13 @@ expr_is_const(Expr *expr)
     }
     else if(expr->kind == EXPR_ID)
     {
-        /* TODO: HERE */
-        assert(0);
+        sym = sym_get(expr->id);
+        if(!sym)
+        {
+            semantic_fatal("Invalid symbol '%s'", expr->id);
+        }
+
+        res = sym->is_const;
     }
     else if(expr->kind >= EXPR_UNARY && expr->kind <= EXPR_UNARY_END)
     {
@@ -1512,8 +1521,14 @@ eval_expr(Expr *expr)
     }
     else if(expr->kind == EXPR_ID)
     {
-        /* TODO: HERE */
-        assert(0);
+        sym = sym_get(expr->id);
+        if(!sym)
+        {
+            semantic_fatal("Invalid symbol '%s'", expr->id);
+        }
+
+        assert(sym->is_const);
+        res = sym->value;
     }
     else if(expr->kind >= EXPR_UNARY && expr->kind <= EXPR_UNARY_END)
     {
@@ -2296,6 +2311,7 @@ resolve_expr_type(Expr *expr, Type *wanted)
     Type *type = 0;
     Sym *sym;
     Type *lt;
+    Type *mt;
     Type *rt;
     Expr *curr;
 
@@ -2372,8 +2388,15 @@ resolve_expr_type(Expr *expr, Type *wanted)
             }
             else if(expr->kind == EXPR_TERNARY)
             {
-                /* TODO: HERE */
-                assert(0);
+                mt = resolve_expr_type(expr->m, wanted);
+                rt = resolve_expr_type(expr->r, mt);
+
+                if(mt != rt)
+                {
+                    semantic_fatal("Type mismatch in ternary expression");
+                }
+
+                type = rt;
             }
             else if(expr->kind == EXPR_ASSIGN)
             {
@@ -2579,11 +2602,22 @@ check_expr(Expr *expr)
             {
                 semantic_fatal("Invalid lvalue (left operand of assignment)");
             }
+
+            lt = resolve_expr_type(expr->l);
+            if(lt->kind = TYPE_ARRAY)
+            {
+                semantic_fatal("Cannot assign to an array variable (only to its elements)");
+            }
         } break;
 
         case EXPR_COMPOUND:
         {
-            /* Nothing */
+            arg = expr->l;
+            while(arg)
+            {
+                check_expr(arg);
+                arg = arg->next;
+            }
         } break;
 
         default:
@@ -2879,6 +2913,7 @@ store_expr_temp_var(Expr *expr)
     Expr *rvalue;
 
     Expr *l;
+    Expr *m;
     Expr *r;
 
     Expr *arg;
@@ -2936,8 +2971,54 @@ store_expr_temp_var(Expr *expr)
     }
     else if(expr->kind == EXPR_TERNARY)
     {
-        /* TODO: HERE */
-        assert(0);
+        lbl1 = lbl_gen();
+        lbl2 = lbl_gen();
+        lbl3 = lbl_gen();
+
+        l = reduce_expr_to_atom(expr->l);
+
+        stmt = make_stmt_if(l, 0, 0);
+        stmt->u.label = lbl1;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_GOTO);
+        stmt->u.label = lbl2;
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_LABEL);
+        stmt->u.label = lbl1;
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        m = reduce_expr_to_atom(expr->m);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(EXPR_ASSIGN, make_expr_id(res), m);
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_GOTO);
+        stmt->u.label = lbl3;
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_LABEL);
+        stmt->u.label = lbl2;
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        r = reduce_expr_to_atom(expr->r);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(EXPR_ASSIGN, make_expr_id(res), m);
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_LABEL);
+        stmt->u.label = lbl3;
+        stmt->next = 0;
+        add_stmt(stmt);
     }
     else if(expr->kind == EXPR_ASSIGN)
     {
@@ -2971,11 +3052,12 @@ store_expr_temp_var(Expr *expr)
         assert(0);
     }
 
-    assert(rvalue);
-
-    stmt = make_stmt(STMT_EXPR);
-    stmt->u.expr = make_expr_binary(EXPR_ASSIGN, make_expr_id(res), rvalue);
-    add_stmt(stmt);
+    if(rvalue)
+    {
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(EXPR_ASSIGN, make_expr_id(res), rvalue);
+        add_stmt(stmt);
+    }
 
     return(res);
 }
@@ -3576,12 +3658,6 @@ compile_expr(FILE *fout, Expr *expr)
             fprintf(fout, "\tmovl %%eax,%%ecx\n");
             compile_lvalue(fout, expr->l);
             fprintf(fout, "\t%s %%ecx,(%%eax)\n", ins);
-        } break;
-
-        case EXPR_TERNARY:
-        {
-            /* TODO: HERE */
-            assert(0);
         } break;
 
         case EXPR_COMPOUND:
