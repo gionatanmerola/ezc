@@ -9,7 +9,8 @@
  * [x] Type inference
  * [x] Code generation based on type width
  * [ ] Code generation larger width than 4 bytes
- * [ ] Arrays
+ * [/] Arrays
+ * [ ] Cast operator
  * [ ] Intern array types?
  * [ ] Structs
  * [ ] Unions
@@ -499,6 +500,7 @@ enum
     EXPR_ID,
 
     EXPR_CALL,
+    EXPR_ARR_SUB,
 
     EXPR_UNARY,
     EXPR_INC_PRE = EXPR_UNARY,
@@ -1305,6 +1307,8 @@ _tok_next(int update_source)
 
             case '(': { ++src; tok.kind = TOK_LPAREN; } break;
             case ')': { ++src; tok.kind = TOK_RPAREN; } break;
+            case '[': { ++src; tok.kind = TOK_LBRACK; } break;
+            case ']': { ++src; tok.kind = TOK_RBRACK; } break;
             case '{': { ++src; tok.kind = TOK_LBRACE; } break;
             case '}': { ++src; tok.kind = TOK_RBRACE; } break;
 
@@ -1439,6 +1443,7 @@ int
 expr_is_const(Expr *expr)
 {
     int res = 0;
+    Sym *sym;
 
     if(expr->kind > EXPR_TERNARY)
     {
@@ -1453,7 +1458,7 @@ expr_is_const(Expr *expr)
         sym = sym_get(expr->id);
         if(!sym)
         {
-            semantic_fatal("Invalid symbol '%s'", expr->id);
+            fatal("Invalid symbol '%s'", expr->id);
         }
 
         res = sym->is_const;
@@ -1510,6 +1515,7 @@ eval_expr(Expr *expr)
     int l = 0;
     int r = 0;
     int m = 0;
+    Sym *sym;
 
     if(expr->kind > EXPR_TERNARY)
     {
@@ -1524,7 +1530,7 @@ eval_expr(Expr *expr)
         sym = sym_get(expr->id);
         if(!sym)
         {
-            semantic_fatal("Invalid symbol '%s'", expr->id);
+            fatal("Invalid symbol '%s'", expr->id);
         }
 
         assert(sym->is_const);
@@ -1643,7 +1649,7 @@ reverse_args_list(Expr *args)
 }
 
 Expr *
-parse_expr_unary_post()
+parse_expr_first_level()
 {
     Expr *expr = 0;
     Expr *args = 0;
@@ -1688,6 +1694,12 @@ parse_expr_unary_post()
                 args = reverse_args_list(args);
             }
             expr = make_expr_binary(EXPR_CALL, expr, args);
+        } break;
+
+        case TOK_LBRACK:
+        {
+            expr = make_expr_binary(EXPR_ARR_SUB, expr, parse_expr());
+            tok_expect(TOK_RBRACK);
         } break;
     }
 
@@ -1746,7 +1758,7 @@ parse_expr_unary()
 
         default:
         {
-            expr = parse_expr_unary_post();
+            expr = parse_expr_first_level();
         } break;
     }
 
@@ -2345,6 +2357,16 @@ resolve_expr_type(Expr *expr, Type *wanted)
             type = type->base_type;
         } break;
 
+        case EXPR_ARR_SUB:
+        {
+            type = resolve_expr_type(expr->l, 0);
+            if(!type || type->kind != TYPE_ARRAY)
+            {
+                semantic_fatal("Cannot operate array subscription on non-array");
+            }
+            type = type->base_type;
+        } break;
+
         default:
         {
             if(expr->kind == EXPR_CALL)
@@ -2521,6 +2543,21 @@ check_expr(Expr *expr)
             }
         } break;
 
+        case EXPR_ARR_SUB:
+        {
+            lt = resolve_expr_type(expr->r, 0);
+            if(lt->kind != TYPE_ARRAY)
+            {
+                semantic_fatal("Array subscription used to non-array");
+            }
+
+            rt = resolve_expr_type(expr->r, type_int());
+            if(rt != type_int())
+            {
+                semantic_fatal("Array subscription operand must be an integer");
+            }
+        } break;
+
         case EXPR_INC_PRE:
         {
             if(!check_lvalue(expr->l))
@@ -2603,8 +2640,8 @@ check_expr(Expr *expr)
                 semantic_fatal("Invalid lvalue (left operand of assignment)");
             }
 
-            lt = resolve_expr_type(expr->l);
-            if(lt->kind = TYPE_ARRAY)
+            lt = resolve_expr_type(expr->l, 0);
+            if(lt->kind == TYPE_ARRAY)
             {
                 semantic_fatal("Cannot assign to an array variable (only to its elements)");
             }
@@ -2920,6 +2957,14 @@ store_expr_temp_var(Expr *expr)
     Expr *args;
     Expr *tmp;
 
+    Type *lt;
+    char *tmpv;
+    char *tmpv2;
+
+    char *lbl1;
+    char *lbl2;
+    char *lbl3;
+
     res = tmp_var();
     stmt = make_stmt(STMT_DECL);
     stmt->u.decl = make_decl(resolve_expr_type(expr, 0), res);
@@ -2957,6 +3002,44 @@ store_expr_temp_var(Expr *expr)
         }
 
         rvalue = make_expr_binary(EXPR_CALL, l, args);
+    }
+    else if(expr->kind == EXPR_ARR_SUB)
+    {
+        lt = resolve_expr_type(expr->l, 0);
+
+        tmpv = store_expr_temp_var(expr->r);
+
+        r = make_expr_binary(EXPR_MUL, make_expr_id(tmpv), make_expr_intlit(lt->size));
+        r = make_expr_binary(EXPR_ASSIGN, make_expr_id(tmpv), r);
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = r;
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        tmpv2 = tmp_var();
+        stmt = make_stmt(STMT_DECL);
+        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv2);
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv2),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(tmpv2),
+                make_expr_id(tmpv)));
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        /**
+         * TODO: There's last step, cast back from (char *) to (base_type *).
+         * To do this, we need a new variable and the cast operator.
+         */
+        /* TODO: HERE */
+
+        rvalue = make_expr_unary(EXPR_DEREF, make_expr_id(tmpv2));
     }
     else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
     {
@@ -3067,9 +3150,53 @@ reduce_expr_to_atom(Expr *expr)
 {
     Expr *res = 0;
 
+    Stmt *stmt;
+    Expr *r;
+    Type *lt;
+    char *tmpv;
+    char *tmpv2;
+
     if(expr_is_atom(expr))
     {
         res = dup_expr(expr);
+    }
+    else if(expr->kind == EXPR_ARR_SUB)
+    {
+        lt = resolve_expr_type(expr->l, 0);
+
+        tmpv = store_expr_temp_var(expr->r);
+
+        r = make_expr_binary(EXPR_MUL, make_expr_id(tmpv), make_expr_intlit(lt->size));
+        r = make_expr_binary(EXPR_ASSIGN, make_expr_id(tmpv), r);
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = r;
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        tmpv2 = tmp_var();
+        stmt = make_stmt(STMT_DECL);
+        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv2);
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv2),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(tmpv2),
+                make_expr_id(tmpv)));
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        /**
+         * TODO: There's last step, cast back from (char *) to (base_type *).
+         * To do this, we need a new variable and the cast operator.
+         */
+        /* TODO: HERE */
+
+        res = make_expr_unary(EXPR_DEREF, make_expr_id(tmpv2));
     }
     else
     {
@@ -3129,6 +3256,10 @@ expr_to_irc(Expr *expr)
         }
 
         final = make_expr_binary(EXPR_CALL, l, args);
+    }
+    else if(expr->kind == EXPR_ARR_SUB)
+    {
+        final = reduce_expr_to_atom(expr);
     }
     else if(expr->kind == EXPR_INC_PRE || expr->kind == EXPR_DEC_PRE)
     {
