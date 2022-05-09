@@ -9,13 +9,15 @@
  * [x] Type inference
  * [x] Code generation based on type width
  * [ ] Code generation larger width than 4 bytes
- * [/] Arrays
- * [ ] Cast operator
- * [ ] Intern array types?
- * [ ] Structs
+ *     For example when assigning a struct, just assign its members.
+ * [x] Arrays
+ * [x] Array subscription operator
+ * [x] Cast operator
+ * [x] Arrays decay into pointers
+ * [/] Structs
  * [ ] Unions
- * [ ] Finite/Non-finite types
- * [ ] Function prototypes
+ * [/] Finite/Non-finite types
+ * [ ] Function prototypes/Function definitions
  * [x] Better AST => IR-C Translation
  * [x] Post-position of labels
  * [x] If-Else
@@ -34,7 +36,7 @@
 #include <stdlib.h>
 #include <assert.h>
 
-#define ALIGN(n, a) ((((n)%(a))>0)?((n)+((a)-((n)%(a)))):0)
+#define ALIGN(n, a) ((((n)%(a))>0)?((n)+((a)-((n)%(a)))):(n))
 
 #define MALLOC_TYPE(_Type_) ((_Type_ *)malloc(sizeof(_Type_)))
 #define DUP_OBJ(_Type_, dest, src)\
@@ -215,6 +217,30 @@ make_func_param(char *id, Type *type)
     return(res);
 }
 
+typedef struct
+AggrElement
+{
+    char *id;
+    Type *type;
+    struct AggrElement *next;
+} AggrElement;
+
+AggrElement *
+make_aggr_element(char *id, Type *type)
+{
+    AggrElement *res;
+
+    res = MALLOC_TYPE(AggrElement);
+    if(res)
+    {
+        res->id = id;
+        res->type = type;
+        res->next = 0;
+    }
+
+    return(res);
+}
+
 enum
 {
     TYPE_VOID,
@@ -223,6 +249,7 @@ enum
     TYPE_PTR,
     TYPE_ARRAY,
     TYPE_FUNC,
+    TYPE_STRUCT,
 
     TYPE_COUNT
 };
@@ -235,6 +262,8 @@ Type
     struct Type *base_type;
     int length;
     FuncParam *params;
+    char *id;
+    AggrElement *def;
 };
 
 Type _type_void = { TYPE_VOID, 0, 0 };
@@ -344,6 +373,62 @@ type_array(Type *base_type, int length)
         res->base_type = base_type;
         res->length = length;
         res->size = length*base_type->size;
+    }
+
+    return(res);
+}
+
+#define TYPE_STRUCT_CACHE_SIZE 100
+Type type_struct_cache[TYPE_STRUCT_CACHE_SIZE];
+int type_struct_cache_count = 0;
+
+Type *
+make_type_struct(char *id, AggrElement *def)
+{
+    Type *res = 0;
+    AggrElement *e;
+    int i;
+
+    for(i = 0;
+        i < type_struct_cache_count;
+        ++i)
+    {
+        if(type_struct_cache[i].id == id)
+        {
+            res = &(type_struct_cache[i]);
+            break;
+        }
+    }
+
+    if (!res)
+    {
+        res = &(type_struct_cache[type_struct_cache_count]);
+        ++type_struct_cache_count;
+        res->kind = TYPE_STRUCT;
+    }
+    else if(res->def && def)
+    {
+        fatal("Cannot redefine a structure");
+    }
+
+    if(!res->def && def)
+    {
+        res->def = def;
+
+        /* Compute struct size */
+        res->size = 0;
+        e = def;
+        while(e)
+        {
+            if(e->type->size == 0)
+            {
+                fatal("Invalid structure member type");
+            }
+            res->size += ALIGN(e->type->size, 4);
+            e = e->next;
+        }
+
+        assert(res->size);
     }
 
     return(res);
@@ -501,11 +586,13 @@ enum
 
     EXPR_CALL,
     EXPR_ARR_SUB,
+    EXPR_MEMB_ACCESS,
 
     EXPR_UNARY,
     EXPR_INC_PRE = EXPR_UNARY,
     EXPR_DEC_PRE,
     EXPR_NEG,
+    EXPR_CAST,
     EXPR_DEREF,
     EXPR_ADDR_OF,
     EXPR_UNARY_END,
@@ -535,6 +622,7 @@ Expr
     struct Expr *l;
     struct Expr *r;
     struct Expr *m;
+    Type *cast_to;
     struct Expr *next;
 } Expr;
 
@@ -572,6 +660,40 @@ make_expr_id(char *id)
     {
         res->kind = EXPR_ID;
         res->id = id;
+        res->next = 0;
+    }
+
+    return(res);
+}
+
+Expr *
+make_expr_cast(Expr *l, Type *type)
+{
+    Expr *res = 0;
+
+    res = MALLOC_TYPE(Expr);
+    if(res)
+    {
+        res->kind = EXPR_CAST;
+        res->l = l;
+        res->cast_to = type;
+        res->next = 0;
+    }
+
+    return(res);
+}
+
+Expr *
+make_expr_member_access(Expr *l, char *member)
+{
+    Expr *res = 0;
+
+    res = MALLOC_TYPE(Expr);
+    if(res)
+    {
+        res->kind = EXPR_MEMB_ACCESS;
+        res->l = l;
+        res->id = member;
         res->next = 0;
     }
 
@@ -646,6 +768,8 @@ make_expr_compound(Expr *l)
     return(res);
 }
 
+void print_type(Type *type);
+
 void
 print_expr(Expr *expr)
 {
@@ -668,6 +792,15 @@ print_expr(Expr *expr)
             printf("call %s", expr->l->id);
         } break;
 
+        case EXPR_ARR_SUB:
+        {
+            printf("(");
+            print_expr(expr->l);
+            printf("[");
+            print_expr(expr->r);
+            printf("])");
+        } break;
+
         case EXPR_INC_PRE:
         {
             printf("(inc ");
@@ -678,6 +811,15 @@ print_expr(Expr *expr)
         case EXPR_DEC_PRE:
         {
             printf("(dec ");
+            print_expr(expr->l);
+            printf(")");
+        } break;
+
+        case EXPR_CAST:
+        {
+            printf("(cast (");
+            print_type(expr->cast_to);
+            printf(") ");
             print_expr(expr->l);
             printf(")");
         } break;
@@ -792,6 +934,11 @@ print_type(Type *type)
     else if(type->kind == TYPE_PTR)
     {
         printf("ptr to ");
+        print_type(type->base_type);
+    }
+    else if(type->kind == TYPE_ARRAY)
+    {
+        printf("array of %d of ", type->length);
         print_type(type->base_type);
     }
     else
@@ -1106,6 +1253,7 @@ int func_var_offset;
 char *kword_void;
 char *kword_char;
 char *kword_int;
+char *kword_struct;
 char *kword_return;
 char *kword_goto;
 char *kword_if;
@@ -1149,6 +1297,7 @@ parser_init(char *src)
     kword_void = str_intern("void");
     kword_char = str_intern("char");
     kword_int = str_intern("int");
+    kword_struct = str_intern("struct");
     kword_return = str_intern("return");
     kword_goto = str_intern("goto");
     kword_if = str_intern("if");
@@ -1173,6 +1322,7 @@ enum
     TOK_SEMI,
     TOK_COLON,
     TOK_COMMA,
+    TOK_DOT,
     TOK_QMARK,
     TOK_AMPERSAND,
 
@@ -1195,6 +1345,7 @@ enum
     TOK_KW_VOID,
     TOK_KW_CHAR,
     TOK_KW_INT,
+    TOK_KW_STRUCT,
 
     TOK_KW_RETURN,
     TOK_KW_GOTO,
@@ -1284,6 +1435,7 @@ _tok_next(int update_source)
                      if(tok.id == kword_void) { tok.kind = TOK_KW_VOID; }
                 else if(tok.id == kword_char) { tok.kind = TOK_KW_CHAR; }
                 else if(tok.id == kword_int) { tok.kind = TOK_KW_INT; }
+                else if(tok.id == kword_struct) { tok.kind = TOK_KW_STRUCT; }
                 else if(tok.id == kword_return) { tok.kind = TOK_KW_RETURN; }
                 else if(tok.id == kword_goto) { tok.kind = TOK_KW_GOTO; }
                 else if(tok.id == kword_if) { tok.kind = TOK_KW_IF; }
@@ -1315,6 +1467,7 @@ _tok_next(int update_source)
             case ';': { ++src; tok.kind = TOK_SEMI; } break;
             case ':': { ++src; tok.kind = TOK_COLON; } break;
             case ',': { ++src; tok.kind = TOK_COMMA; } break;
+            case '.': { ++src; tok.kind = TOK_DOT; } break;
             case '?': { ++src; tok.kind = TOK_QMARK; } break;
             case '&': { ++src; tok.kind = TOK_AMPERSAND; } break;
 
@@ -1593,6 +1746,7 @@ eval_expr(Expr *expr)
 
 Expr *parse_expr_assign();
 Expr *parse_expr();
+Type *parse_type(Type *type);
 
 Expr *
 parse_expr_base()
@@ -1698,8 +1852,17 @@ parse_expr_first_level()
 
         case TOK_LBRACK:
         {
+            tok_next();
             expr = make_expr_binary(EXPR_ARR_SUB, expr, parse_expr());
             tok_expect(TOK_RBRACK);
+        } break;
+
+        case TOK_DOT:
+        {
+            tok_next();
+
+            tok = tok_expect(TOK_ID);
+            expr = make_expr_member_access(expr, tok.id);
         } break;
     }
 
@@ -1711,6 +1874,7 @@ parse_expr_unary()
 {
     Expr *expr = 0;
     Token tok;
+    Type *type;
 
     tok = tok_peek();
     switch(tok.kind)
@@ -1729,6 +1893,12 @@ parse_expr_unary()
             expr = make_expr_unary(EXPR_DEC_PRE, expr);
         } break;
 
+        case TOK_PLUS:
+        {
+            tok_next();
+            expr = parse_expr_unary();
+        } break;
+
         case TOK_MINUS:
         {
             tok_next();
@@ -1736,10 +1906,23 @@ parse_expr_unary()
             expr = make_expr_unary(EXPR_NEG, expr);
         } break;
 
-        case TOK_PLUS:
+        case TOK_LPAREN:
         {
             tok_next();
-            expr = parse_expr_unary();
+
+            tok = tok_peek();
+            if(tok_is_type(tok))
+            {
+                type = parse_type(0);
+                tok_expect(TOK_RPAREN);
+
+                expr = make_expr_cast(parse_expr_unary(), type);
+            }
+            else
+            {
+                expr = parse_expr();
+                tok_expect(TOK_RPAREN);
+            }
         } break;
 
         case TOK_ASTERISK:
@@ -1877,13 +2060,64 @@ parse_expr()
 
 /*
  * <decl> ::= <type> <ident> ('[' <expr> ']')? ';'
+ *
+ * <type> ::= <base_type> '*'*
+ *
+ * <base_type> ::= 'void' | 'char' | 'int'
+ *          | 'struct' <ident> <struct-definition>?
  */
 
+Type *parse_base_type();
+Type *parse_type(Type *base_type);
+AggrElement *parse_struct_def();
+
+AggrElement *
+parse_struct_def()
+{
+    AggrElement *res = 0;
+    AggrElement curr = 0;
+    Type *type;
+    Token tok;
+    char *id;
+
+    tok_expect(TOK_LBRACE);
+
+    tok = tok_peek();
+    while(tok.kind != TOK_RBRACE)
+    {
+        type = parse_type();
+        tok = tok_expect(TOK_ID);
+        id = tok.id;
+        if(curr)
+        {
+            curr->next = make_aggr_element(id, type);
+            curr = curr->next;
+        }
+        else
+        {
+            curr = make_aggr_element(id, type);
+            res = curr;
+        }
+        tok = tok_peek();
+    }
+
+    tok_expect(TOK_RBRACE);
+
+    if(!res)
+    {
+        syntax_fatal("Invalid struct definition");
+    }
+
+    return(res);
+}
+
 Type *
-get_base_type()
+parse_base_type()
 {
     Type *type = 0;
     Token tok;
+    char *id;
+    AggrElement *sdef;
 
     tok = tok_peek();
     switch(tok.kind)
@@ -1905,6 +2139,22 @@ get_base_type()
             tok_next();
             type = type_int();
         } break;
+
+        case TOK_KW_STRUCT:
+        {
+            tok_next();
+            tok = tok_expect(TOK_ID);
+            id = tok.id;
+
+            sdef = 0;
+            tok = tok_peek();
+            if(tok.kind == TOK_LBRACE)
+            {
+                sdef = parse_struct_def();
+            }
+
+            type = type_struct(id, sdef);
+        } break;
     }
 
     return(type);
@@ -1916,6 +2166,10 @@ parse_type(Type *base_type)
     Type *type = 0;
     Token tok;
 
+    if(!base_type)
+    {
+        parse_base_type();
+    }
     type = base_type;
 
     tok = tok_peek();
@@ -1939,7 +2193,7 @@ parse_decl()
     Expr *expr;
     int length;
 
-    type = get_base_type();
+    type = parse_base_type();
     if(!type)
     {
         syntax_fatal("Invalid type for variable declaration");
@@ -2156,7 +2410,7 @@ parse_func_param()
     Type *type;
     Token tok;
 
-    type = get_base_type();
+    type = parse_base_type();
     if(!type)
     {
         syntax_fatal("Invalid type for function parameter");
@@ -2184,7 +2438,7 @@ parse_glob_decl()
     FuncParam *curr_param;
     Stmt *func_def;
 
-    type = get_base_type();
+    type = parse_base_type();
     if(!type)
     {
         syntax_fatal("Invalid type for global declaration");
@@ -2360,9 +2614,9 @@ resolve_expr_type(Expr *expr, Type *wanted)
         case EXPR_ARR_SUB:
         {
             type = resolve_expr_type(expr->l, 0);
-            if(!type || type->kind != TYPE_ARRAY)
+            if(!type || (type->kind != TYPE_ARRAY && type->kind != TYPE_PTR))
             {
-                semantic_fatal("Cannot operate array subscription on non-array");
+                semantic_fatal("Cannot operate array subscription on non-array or non-ptr");
             }
             type = type->base_type;
         } break;
@@ -2373,6 +2627,11 @@ resolve_expr_type(Expr *expr, Type *wanted)
             {
                 type = resolve_expr_type(expr->l, wanted);
                 type = type->base_type;
+            }
+            else if(expr->kind == EXPR_CAST)
+            {
+                type = resolve_expr_type(expr->l, wanted);
+                type = expr->cast_to;
             }
             else if(expr->kind == EXPR_DEREF)
             {
@@ -2463,6 +2722,12 @@ resolve_expr_type(Expr *expr, Type *wanted)
         type = type_int();
     }
 
+    /* Array decays into a pointer */
+    if(type->kind == TYPE_ARRAY && expr->kind != EXPR_ADDR_OF)
+    {
+        type = type_ptr(type->base_type);
+    }
+
     return(type);
 }
 
@@ -2476,6 +2741,10 @@ check_lvalue(Expr *expr)
         res = 1;
     }
     else if(expr->kind == EXPR_DEREF)
+    {
+        res = 1;
+    }
+    else if(expr->kind == EXPR_ARR_SUB)
     {
         res = 1;
     }
@@ -2546,9 +2815,14 @@ check_expr(Expr *expr)
         case EXPR_ARR_SUB:
         {
             lt = resolve_expr_type(expr->r, 0);
-            if(lt->kind != TYPE_ARRAY)
+            if(lt->kind != TYPE_ARRAY && lt->kind != TYPE_PTR)
             {
-                semantic_fatal("Array subscription used to non-array");
+                semantic_fatal("Array subscription used to non-array and non-pointer");
+            }
+
+            if(lt->base_type == type_void())
+            {
+                semantic_fatal("Subscription on a void pointer");
             }
 
             rt = resolve_expr_type(expr->r, type_int());
@@ -2582,6 +2856,11 @@ check_expr(Expr *expr)
             {
                 semantic_fatal("Invalid arithmetic expression operand");
             }
+        } break;
+
+        case EXPR_CAST:
+        {
+            lt = resolve_expr_type(expr->l, 0);
         } break;
 
         case EXPR_DEREF:
@@ -2960,6 +3239,7 @@ store_expr_temp_var(Expr *expr)
     Type *lt;
     char *tmpv;
     char *tmpv2;
+    char *tmpv3;
 
     char *lbl1;
     char *lbl2;
@@ -2973,7 +3253,25 @@ store_expr_temp_var(Expr *expr)
     rvalue = 0;
     if(expr_is_atom(expr))
     {
-        rvalue = dup_expr(expr);
+        if(expr->kind == EXPR_ID)
+        {
+            lt = resolve_expr_type(expr, 0);
+
+            /* Array decays into a pointer */
+            if(lt->kind == TYPE_ARRAY)
+            {
+                stmt->u.decl->type = type_ptr(lt->base_type);
+                rvalue = make_expr_id(expr->id);
+            }
+            else
+            {
+                rvalue = dup_expr(expr);
+            }
+        }
+        else
+        {
+            rvalue = dup_expr(expr);
+        }
     }
     else if(expr->kind == EXPR_CALL)
     {
@@ -3008,17 +3306,41 @@ store_expr_temp_var(Expr *expr)
         lt = resolve_expr_type(expr->l, 0);
 
         tmpv = store_expr_temp_var(expr->r);
-
-        r = make_expr_binary(EXPR_MUL, make_expr_id(tmpv), make_expr_intlit(lt->size));
-        r = make_expr_binary(EXPR_ASSIGN, make_expr_id(tmpv), r);
         stmt = make_stmt(STMT_EXPR);
-        stmt->u.expr = r;
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv), 
+            make_expr_binary(
+                EXPR_MUL,
+                make_expr_id(tmpv),
+                make_expr_intlit(lt->base_type->size)));
         stmt->next = 0;
         add_stmt(stmt);
 
-        tmpv2 = tmp_var();
+        tmpv2 = store_expr_temp_var(expr->l);
+
+        tmpv3 = tmp_var();
         stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv2);
+        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv3);
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv3),
+            make_expr_cast(make_expr_id(tmpv2), type_ptr(type_char())));
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv3),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(tmpv3),
+                make_expr_id(tmpv)));
         stmt->next = 0;
         add_stmt(stmt);
 
@@ -3026,18 +3348,9 @@ store_expr_temp_var(Expr *expr)
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
             make_expr_id(tmpv2),
-            make_expr_binary(
-                EXPR_ADD,
-                make_expr_id(tmpv2),
-                make_expr_id(tmpv)));
+            make_expr_cast(make_expr_id(tmpv3), type_ptr(lt->base_type)));
         stmt->next = 0;
         add_stmt(stmt);
-
-        /**
-         * TODO: There's last step, cast back from (char *) to (base_type *).
-         * To do this, we need a new variable and the cast operator.
-         */
-        /* TODO: HERE */
 
         rvalue = make_expr_unary(EXPR_DEREF, make_expr_id(tmpv2));
     }
@@ -3151,12 +3464,16 @@ reduce_expr_to_atom(Expr *expr)
     Expr *res = 0;
 
     Stmt *stmt;
-    Expr *r;
     Type *lt;
     char *tmpv;
     char *tmpv2;
+    char *tmpv3;
 
     if(expr_is_atom(expr))
+    {
+        res = dup_expr(expr);
+    }
+    else if(expr->kind == EXPR_DEREF)
     {
         res = dup_expr(expr);
     }
@@ -3165,17 +3482,41 @@ reduce_expr_to_atom(Expr *expr)
         lt = resolve_expr_type(expr->l, 0);
 
         tmpv = store_expr_temp_var(expr->r);
-
-        r = make_expr_binary(EXPR_MUL, make_expr_id(tmpv), make_expr_intlit(lt->size));
-        r = make_expr_binary(EXPR_ASSIGN, make_expr_id(tmpv), r);
         stmt = make_stmt(STMT_EXPR);
-        stmt->u.expr = r;
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv), 
+            make_expr_binary(
+                EXPR_MUL,
+                make_expr_id(tmpv),
+                make_expr_intlit(lt->base_type->size)));
         stmt->next = 0;
         add_stmt(stmt);
 
-        tmpv2 = tmp_var();
+        tmpv2 = store_expr_temp_var(expr->l);
+
+        tmpv3 = tmp_var();
         stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv2);
+        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv3);
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv3),
+            make_expr_cast(make_expr_id(tmpv2), type_ptr(type_char())));
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(tmpv3),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(tmpv3),
+                make_expr_id(tmpv)));
         stmt->next = 0;
         add_stmt(stmt);
 
@@ -3183,18 +3524,9 @@ reduce_expr_to_atom(Expr *expr)
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
             make_expr_id(tmpv2),
-            make_expr_binary(
-                EXPR_ADD,
-                make_expr_id(tmpv2),
-                make_expr_id(tmpv)));
+            make_expr_cast(make_expr_id(tmpv3), type_ptr(lt->base_type)));
         stmt->next = 0;
         add_stmt(stmt);
-
-        /**
-         * TODO: There's last step, cast back from (char *) to (base_type *).
-         * To do this, we need a new variable and the cast operator.
-         */
-        /* TODO: HERE */
 
         res = make_expr_unary(EXPR_DEREF, make_expr_id(tmpv2));
     }
@@ -3631,6 +3963,7 @@ compile_expr(FILE *fout, Expr *expr)
     Type *type;
     char *ins;
 
+    ins = 0;
     switch(expr->kind)
     {
         case EXPR_INTLIT:
@@ -3646,15 +3979,16 @@ compile_expr(FILE *fout, Expr *expr)
                 fatal("Invalid symbol %s", expr->id);
             }
 
-            if(sym->type->size == 1)
+            type = resolve_expr_type(expr, 0);
+            if(type->size == 1)
             {
                 ins = "movzbl";
             }
-            else if(sym->type->size == 2)
+            else if(type->size == 2)
             {
                 ins = "movzwl";
             }
-            else if(sym->type->size == 4)
+            else if(type->size == 4)
             {
                 ins = "movl";
             }
@@ -3663,7 +3997,11 @@ compile_expr(FILE *fout, Expr *expr)
                 assert(0);
             }
 
-            if(sym->global)
+            if(sym->type->kind == TYPE_ARRAY)
+            {
+                compile_lvalue(fout, expr);
+            }
+            else if(sym->global)
             {
                 fprintf(fout, "\tmovl %s,%%ebx\n", sym->id);
                 fprintf(fout, "\t%s (%%ebx),%%eax\n", ins);
@@ -3730,6 +4068,40 @@ compile_expr(FILE *fout, Expr *expr)
         {
             compile_expr(fout, expr->l);
             fprintf(fout, "\tnegl %%eax\n");
+        } break;
+
+        case EXPR_CAST:
+        {
+            type = resolve_expr_type(expr->l, 0);
+            if(type->size >= expr->cast_to->size)
+            {
+                /* Nothing */
+            }
+            else if(type->size < expr->cast_to->size)
+            {
+                if(type->size == 1 && expr->cast_to->size == 2)
+                {
+                    ins = "movzbw";
+                }
+                else if(type->size == 1 && expr->cast_to->size == 4)
+                {
+                    ins = "movzbl";
+                }
+                else if(type->size == 2 && expr->cast_to->size == 4)
+                {
+                    ins = "movzwl";
+                }
+                else
+                {
+                    assert(0);
+                }
+            }
+
+            compile_expr(fout, expr->l);
+            if(ins)
+            {
+                fprintf(fout, "\t%s %%eax,%%eax\n", ins);
+            }
         } break;
 
         case EXPR_MUL:
@@ -4006,12 +4378,10 @@ main(int argc, char *argv[])
 
     src = "int putchar(int c);\n"
           "int main() {\n"
-          "    int a;\n"
-          "    int b;\n"
-          "    a = -80;\n"
-          "    b = 80;\n"
-          "    while(b) --b;\n"
-          "    return b+4;\n"
+          "    int arr[10];\n"
+          "    arr[0] = 4;\n"
+          "    arr[8] = arr[0] = 3;\n"
+          "    return arr[8];\n"
           "}";
     parser_init(src);
     unit = parse_unit();
