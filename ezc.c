@@ -222,11 +222,12 @@ AggrElement
 {
     char *id;
     Type *type;
+    int offset;
     struct AggrElement *next;
 } AggrElement;
 
 AggrElement *
-make_aggr_element(char *id, Type *type)
+make_aggr_element(char *id, Type *type, int offset)
 {
     AggrElement *res;
 
@@ -235,6 +236,7 @@ make_aggr_element(char *id, Type *type)
     {
         res->id = id;
         res->type = type;
+        res->offset = offset;
         res->next = 0;
     }
 
@@ -383,7 +385,7 @@ Type type_struct_cache[TYPE_STRUCT_CACHE_SIZE];
 int type_struct_cache_count = 0;
 
 Type *
-make_type_struct(char *id, AggrElement *def)
+type_struct(char *id, AggrElement *def)
 {
     Type *res = 0;
     AggrElement *e;
@@ -405,6 +407,7 @@ make_type_struct(char *id, AggrElement *def)
         res = &(type_struct_cache[type_struct_cache_count]);
         ++type_struct_cache_count;
         res->kind = TYPE_STRUCT;
+        res->id = id;
     }
     else if(res->def && def)
     {
@@ -432,6 +435,46 @@ make_type_struct(char *id, AggrElement *def)
     }
 
     return(res);
+}
+
+AggrElement *
+get_struct_member(Type *stype, char *id)
+{
+    AggrElement *res;
+    AggrElement *curr;
+
+    res = 0;
+    if(stype->def)
+    {
+        curr = stype->def;
+        while(curr)
+        {
+            if(curr->id == id)
+            {
+                res = curr;
+                break;
+            }
+            curr = curr->next;
+        }
+    }
+
+    return(res);
+}
+
+int
+get_struct_member_offset(Type *stype, char *id)
+{
+    int offset;
+    AggrElement *el;
+
+    offset = -1;
+    el = get_struct_member(stype, id);
+    if(el)
+    {
+        offset = el->offset;
+    }
+
+    return(offset);
 }
 
 /******************************************************************************/
@@ -587,6 +630,7 @@ enum
     EXPR_CALL,
     EXPR_ARR_SUB,
     EXPR_MEMB_ACCESS,
+    EXPR_MEMB_ACCESS_PTR,
 
     EXPR_UNARY,
     EXPR_INC_PRE = EXPR_UNARY,
@@ -701,6 +745,23 @@ make_expr_member_access(Expr *l, char *member)
 }
 
 Expr *
+make_expr_member_access_ptr(Expr *l, char *member)
+{
+    Expr *res = 0;
+
+    res = MALLOC_TYPE(Expr);
+    if(res)
+    {
+        res->kind = EXPR_MEMB_ACCESS_PTR;
+        res->l = l;
+        res->id = member;
+        res->next = 0;
+    }
+
+    return(res);
+}
+
+Expr *
 make_expr_unary(int kind, Expr *l)
 {
     Expr *res = 0;
@@ -789,7 +850,7 @@ print_expr(Expr *expr)
 
         case EXPR_CALL:
         {
-            printf("call %s", expr->l->id);
+            printf("(call %s)", expr->l->id);
         } break;
 
         case EXPR_ARR_SUB:
@@ -799,6 +860,20 @@ print_expr(Expr *expr)
             printf("[");
             print_expr(expr->r);
             printf("])");
+        } break;
+
+        case EXPR_MEMB_ACCESS:
+        {
+            printf("(");
+            print_expr(expr->l);
+            printf(".%s)", expr->id);
+        } break;
+
+        case EXPR_MEMB_ACCESS_PTR:
+        {
+            printf("(");
+            print_expr(expr->l);
+            printf("->%s)", expr->id);
         } break;
 
         case EXPR_INC_PRE:
@@ -941,6 +1016,10 @@ print_type(Type *type)
         printf("array of %d of ", type->length);
         print_type(type->base_type);
     }
+    else if(type->kind == TYPE_STRUCT)
+    {
+        printf("struct %s", type->id);
+    }
     else
     {
         fatal("Invalid type to print");
@@ -1008,6 +1087,34 @@ dup_stmt(Stmt *stmt)
     Stmt *new;
     new = DUP_OBJ(Stmt, new, stmt);
     return(new);
+}
+
+Stmt *
+make_stmt_decl(Decl *decl)
+{
+    Stmt *res = 0;
+
+    res = make_stmt(STMT_DECL);
+    if(res)
+    {
+        res->u.decl = decl;
+    }
+
+    return(res);
+}
+
+Stmt *
+make_stmt_expr(Expr *expr)
+{
+    Stmt *res = 0;
+
+    res = make_stmt(STMT_EXPR);
+    if(res)
+    {
+        res->u.expr = expr;
+    }
+
+    return(res);
 }
 
 Stmt *
@@ -1325,6 +1432,7 @@ enum
     TOK_DOT,
     TOK_QMARK,
     TOK_AMPERSAND,
+    TOK_MEMB_ACCESS_PTR,
 
     TOK_PLUS_PLUS,
     TOK_MINUS_MINUS,
@@ -1495,6 +1603,11 @@ _tok_next(int update_source)
                     ++src;
                     tok.kind = TOK_MINUS_MINUS;
                 }
+                else if(*src == '>')
+                {
+                    ++src;
+                    tok.kind = TOK_MEMB_ACCESS_PTR;
+                }
             } break;
 
             case '=': { ++src; tok.kind = TOK_EQUAL; } break;
@@ -1532,6 +1645,10 @@ tok_expect(int tok_kind)
 {
     Token tok;
     tok = tok_next();
+    if(tok.kind != tok_kind)
+    {
+        syntax_fatal("Expected token %d, found %d\n", tok_kind, tok.kind);
+    }
     assert(tok.kind == tok_kind);
     return(tok);
 }
@@ -1864,6 +1981,14 @@ parse_expr_first_level()
             tok = tok_expect(TOK_ID);
             expr = make_expr_member_access(expr, tok.id);
         } break;
+
+        case TOK_MEMB_ACCESS_PTR:
+        {
+            tok_next();
+
+            tok = tok_expect(TOK_ID);
+            expr = make_expr_member_access_ptr(expr, tok.id);
+        } break;
     }
 
     return(expr);
@@ -2075,29 +2200,33 @@ AggrElement *
 parse_struct_def()
 {
     AggrElement *res = 0;
-    AggrElement curr = 0;
+    AggrElement *curr = 0;
     Type *type;
     Token tok;
     char *id;
+    int offset;
 
     tok_expect(TOK_LBRACE);
 
+    offset = 0;
     tok = tok_peek();
     while(tok.kind != TOK_RBRACE)
     {
-        type = parse_type();
+        type = parse_type(0);
         tok = tok_expect(TOK_ID);
         id = tok.id;
         if(curr)
         {
-            curr->next = make_aggr_element(id, type);
+            curr->next = make_aggr_element(id, type, offset);
             curr = curr->next;
         }
         else
         {
-            curr = make_aggr_element(id, type);
+            curr = make_aggr_element(id, type, offset);
             res = curr;
         }
+        offset += ALIGN(type->size, 4);
+        tok_expect(TOK_SEMI);
         tok = tok_peek();
     }
 
@@ -2168,7 +2297,7 @@ parse_type(Type *base_type)
 
     if(!base_type)
     {
-        parse_base_type();
+        base_type = parse_base_type();
     }
     type = base_type;
 
@@ -2410,6 +2539,9 @@ parse_func_param()
     Type *type;
     Token tok;
 
+    type = parse_type(0);
+
+#if 0
     type = parse_base_type();
     if(!type)
     {
@@ -2417,6 +2549,7 @@ parse_func_param()
     }
 
     type = parse_type(type);
+#endif
 
     tok = tok_expect(TOK_ID);
     id = tok.id;
@@ -2437,6 +2570,7 @@ parse_glob_decl()
     FuncParam *params;
     FuncParam *curr_param;
     Stmt *func_def;
+
 
     type = parse_base_type();
     if(!type)
@@ -2480,6 +2614,10 @@ parse_glob_decl()
             if(tok.kind != TOK_COMMA)
             {
                 break;
+            }
+            else
+            {
+                tok = tok_next();
             }
         }
         tok_expect(TOK_RPAREN);
@@ -2580,6 +2718,7 @@ resolve_expr_type(Expr *expr, Type *wanted)
     Type *mt;
     Type *rt;
     Expr *curr;
+    AggrElement *curr_el;
 
     switch(expr->kind)
     {
@@ -2619,6 +2758,54 @@ resolve_expr_type(Expr *expr, Type *wanted)
                 semantic_fatal("Cannot operate array subscription on non-array or non-ptr");
             }
             type = type->base_type;
+        } break;
+
+        case EXPR_MEMB_ACCESS:
+        {
+            type = resolve_expr_type(expr->l, 0);
+            if(!type || type->kind != TYPE_STRUCT)
+            {
+                semantic_fatal("Cannot access a member of a non-struct");
+            }
+            if(!type->def)
+            {
+                semantic_fatal("Cannot access a member of an undefined struct");
+            }
+
+            curr_el = get_struct_member(type, expr->id);
+            type = 0;
+            if(curr_el)
+            {
+                type = curr_el->type;
+            }
+            if(!type)
+            {
+                semantic_fatal("Tried to access an invalid struct member");
+            }
+        } break;
+
+        case EXPR_MEMB_ACCESS_PTR:
+        {
+            type = resolve_expr_type(expr->l, 0);
+            if(!type || type->kind != TYPE_PTR || type->base_type->kind != TYPE_STRUCT)
+            {
+                semantic_fatal("Cannot access a member of a non-pointer-to-struct");
+            }
+            if(!type->base_type->def)
+            {
+                semantic_fatal("Cannot access a member of an undefined struct");
+            }
+
+            curr_el = get_struct_member(type->base_type, expr->id);
+            type = 0;
+            if(curr_el)
+            {
+                type = curr_el->type;
+            }
+            if(!type)
+            {
+                semantic_fatal("Tried to access an invalid struct member");
+            }
         } break;
 
         default:
@@ -2748,6 +2935,14 @@ check_lvalue(Expr *expr)
     {
         res = 1;
     }
+    else if(expr->kind == EXPR_MEMB_ACCESS)
+    {
+        res = 1;
+    }
+    else if(expr->kind == EXPR_MEMB_ACCESS_PTR)
+    {
+        res = 1;
+    }
 
     return(res);
 }
@@ -2762,6 +2957,7 @@ check_expr(Expr *expr)
 
     Expr *arg;
     FuncParam *param;
+    AggrElement *aggr_el;
 
     switch(expr->kind)
     {
@@ -2829,6 +3025,64 @@ check_expr(Expr *expr)
             if(rt != type_int())
             {
                 semantic_fatal("Array subscription operand must be an integer");
+            }
+        } break;
+
+        case EXPR_MEMB_ACCESS:
+        {
+            lt = resolve_expr_type(expr->l, 0);
+            if(!lt || lt->kind != TYPE_STRUCT)
+            {
+                semantic_fatal("Cannot access a member of a non-struct");
+            }
+            if(!lt->def)
+            {
+                semantic_fatal("Cannot access a member of an undefined struct");
+            }
+
+            aggr_el = lt->def;
+            lt = 0;
+            while(aggr_el)
+            {
+                if(aggr_el->id == expr->id)
+                {
+                    lt = aggr_el->type;
+                    break;
+                }
+                aggr_el = aggr_el->next;
+            }
+            if(!lt)
+            {
+                semantic_fatal("Tried to access an invalid struct member");
+            }
+        } break;
+
+        case EXPR_MEMB_ACCESS_PTR:
+        {
+            lt = resolve_expr_type(expr->l, 0);
+            if(!lt || lt->kind != TYPE_PTR || lt->base_type->kind != TYPE_STRUCT)
+            {
+                semantic_fatal("Cannot access a member of a non-pointer-to-struct");
+            }
+            if(!lt->base_type->def)
+            {
+                semantic_fatal("Cannot access a member of an undefined struct");
+            }
+
+            aggr_el = lt->base_type->def;
+            lt = 0;
+            while(aggr_el)
+            {
+                if(aggr_el->id == expr->id)
+                {
+                    lt = aggr_el->type;
+                    break;
+                }
+                aggr_el = aggr_el->next;
+            }
+            if(!lt)
+            {
+                semantic_fatal("Tried to access an invalid struct member");
             }
         } break;
 
@@ -3206,6 +3460,21 @@ add_stmt(Stmt *stmt)
     }
 }
 
+char *
+declare_tmp_var(Type *type)
+{
+    char *res;
+    Stmt *stmt;
+
+    res = tmp_var();
+    assert(type);
+    stmt = make_stmt_decl(make_decl(type, res));
+    stmt->next = 0;
+    add_stmt(stmt);
+
+    return(res);
+}
+
 Stmt *block_to_irc(Stmt *block);
 
 int
@@ -3237,9 +3506,10 @@ store_expr_temp_var(Expr *expr)
     Expr *tmp;
 
     Type *lt;
-    char *tmpv;
-    char *tmpv2;
-    char *tmpv3;
+    char *t1;
+    char *t2;
+    char *t3;
+    AggrElement *aggr_el;
 
     char *lbl1;
     char *lbl2;
@@ -3305,54 +3575,134 @@ store_expr_temp_var(Expr *expr)
     {
         lt = resolve_expr_type(expr->l, 0);
 
-        tmpv = store_expr_temp_var(expr->r);
+        t1 = store_expr_temp_var(expr->r);
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv), 
+            make_expr_id(t1), 
             make_expr_binary(
                 EXPR_MUL,
-                make_expr_id(tmpv),
+                make_expr_id(t1),
                 make_expr_intlit(lt->base_type->size)));
         stmt->next = 0;
         add_stmt(stmt);
 
-        tmpv2 = store_expr_temp_var(expr->l);
+        t2 = store_expr_temp_var(expr->l);
 
-        tmpv3 = tmp_var();
+        t3 = tmp_var();
         stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv3);
+        stmt->u.decl = make_decl(type_ptr(type_char()), t3);
         stmt->next = 0;
         add_stmt(stmt);
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv3),
-            make_expr_cast(make_expr_id(tmpv2), type_ptr(type_char())));
+            make_expr_id(t3),
+            make_expr_cast(make_expr_id(t2), type_ptr(type_char())));
         stmt->next = 0;
         add_stmt(stmt);
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv3),
+            make_expr_id(t3),
             make_expr_binary(
                 EXPR_ADD,
-                make_expr_id(tmpv3),
-                make_expr_id(tmpv)));
+                make_expr_id(t3),
+                make_expr_id(t1)));
         stmt->next = 0;
         add_stmt(stmt);
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv2),
-            make_expr_cast(make_expr_id(tmpv3), type_ptr(lt->base_type)));
+            make_expr_id(t2),
+            make_expr_cast(make_expr_id(t3), type_ptr(lt->base_type)));
         stmt->next = 0;
         add_stmt(stmt);
 
-        rvalue = make_expr_unary(EXPR_DEREF, make_expr_id(tmpv2));
+        rvalue = make_expr_unary(EXPR_DEREF, make_expr_id(t2));
+    }
+    else if(expr->kind == EXPR_MEMB_ACCESS)
+    {
+        lt = resolve_expr_type(expr->l, 0);
+        assert(lt->kind == TYPE_STRUCT);
+        l = reduce_expr_to_atom(expr->l);
+
+        t1 = declare_tmp_var(type_ptr(lt));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t1),
+            make_expr_unary(EXPR_ADDR_OF, dup_expr(l))));
+        add_stmt(stmt);
+
+        t2 = declare_tmp_var(type_ptr(type_char()));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t2),
+            make_expr_cast(make_expr_id(t1), type_ptr(type_char()))));
+        add_stmt(stmt);
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t2),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(t2),
+                make_expr_intlit(get_struct_member_offset(lt, expr->id)))));
+        add_stmt(stmt);
+
+        aggr_el = get_struct_member(lt, expr->id);
+        assert(aggr_el);
+
+        t3 = declare_tmp_var(type_ptr(aggr_el->type));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t3),
+            make_expr_cast(make_expr_id(t2), type_ptr(aggr_el->type))));
+        add_stmt(stmt);
+
+        rvalue = make_expr_unary(EXPR_DEREF, make_expr_id(t3));
+    }
+    else if(expr->kind == EXPR_MEMB_ACCESS_PTR)
+    {
+        lt = resolve_expr_type(expr->l, 0);
+        assert(lt->kind == TYPE_PTR && lt->base_type->kind == TYPE_STRUCT);
+        l = reduce_expr_to_atom(expr->l);
+
+        t1 = declare_tmp_var(type_ptr(type_char()));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t1),
+            make_expr_cast(dup_expr(l), type_ptr(type_char()))));
+        add_stmt(stmt);
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t1),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(t1),
+                make_expr_intlit(get_struct_member_offset(lt, expr->id)))));
+        add_stmt(stmt);
+
+        aggr_el = get_struct_member(lt, expr->id);
+        assert(aggr_el);
+
+        t2 = declare_tmp_var(type_ptr(aggr_el->type));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t2),
+            make_expr_cast(make_expr_id(t1), type_ptr(aggr_el->type))));
+        add_stmt(stmt);
+
+        rvalue = make_expr_unary(EXPR_DEREF, make_expr_id(t2));
     }
     else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
     {
@@ -3464,10 +3814,12 @@ reduce_expr_to_atom(Expr *expr)
     Expr *res = 0;
 
     Stmt *stmt;
+    Expr *l;
     Type *lt;
-    char *tmpv;
-    char *tmpv2;
-    char *tmpv3;
+    char *t1;
+    char *t2;
+    char *t3;
+    AggrElement *aggr_el;
 
     if(expr_is_atom(expr))
     {
@@ -3481,54 +3833,134 @@ reduce_expr_to_atom(Expr *expr)
     {
         lt = resolve_expr_type(expr->l, 0);
 
-        tmpv = store_expr_temp_var(expr->r);
+        t1 = store_expr_temp_var(expr->r);
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv), 
+            make_expr_id(t1), 
             make_expr_binary(
                 EXPR_MUL,
-                make_expr_id(tmpv),
+                make_expr_id(t1),
                 make_expr_intlit(lt->base_type->size)));
         stmt->next = 0;
         add_stmt(stmt);
 
-        tmpv2 = store_expr_temp_var(expr->l);
+        t2 = store_expr_temp_var(expr->l);
 
-        tmpv3 = tmp_var();
+        t3 = tmp_var();
         stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(type_ptr(type_char()), tmpv3);
+        stmt->u.decl = make_decl(type_ptr(type_char()), t3);
         stmt->next = 0;
         add_stmt(stmt);
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv3),
-            make_expr_cast(make_expr_id(tmpv2), type_ptr(type_char())));
+            make_expr_id(t3),
+            make_expr_cast(make_expr_id(t2), type_ptr(type_char())));
         stmt->next = 0;
         add_stmt(stmt);
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv3),
+            make_expr_id(t3),
             make_expr_binary(
                 EXPR_ADD,
-                make_expr_id(tmpv3),
-                make_expr_id(tmpv)));
+                make_expr_id(t3),
+                make_expr_id(t1)));
         stmt->next = 0;
         add_stmt(stmt);
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
             EXPR_ASSIGN,
-            make_expr_id(tmpv2),
-            make_expr_cast(make_expr_id(tmpv3), type_ptr(lt->base_type)));
+            make_expr_id(t2),
+            make_expr_cast(make_expr_id(t3), type_ptr(lt->base_type)));
         stmt->next = 0;
         add_stmt(stmt);
 
-        res = make_expr_unary(EXPR_DEREF, make_expr_id(tmpv2));
+        res = make_expr_unary(EXPR_DEREF, make_expr_id(t2));
+    }
+    else if(expr->kind == EXPR_MEMB_ACCESS)
+    {
+        lt = resolve_expr_type(expr->l, 0);
+        assert(lt->kind == TYPE_STRUCT);
+        l = reduce_expr_to_atom(expr->l);
+
+        t1 = declare_tmp_var(type_ptr(lt));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t1),
+            make_expr_unary(EXPR_ADDR_OF, dup_expr(l))));
+        add_stmt(stmt);
+
+        t2 = declare_tmp_var(type_ptr(type_char()));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t2),
+            make_expr_cast(make_expr_id(t1), type_ptr(type_char()))));
+        add_stmt(stmt);
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t2),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(t2),
+                make_expr_intlit(get_struct_member_offset(lt, expr->id)))));
+        add_stmt(stmt);
+
+        aggr_el = get_struct_member(lt, expr->id);
+        assert(aggr_el);
+
+        t3 = declare_tmp_var(type_ptr(aggr_el->type));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t3),
+            make_expr_cast(make_expr_id(t2), type_ptr(aggr_el->type))));
+        add_stmt(stmt);
+
+        res = make_expr_unary(EXPR_DEREF, make_expr_id(t3));
+    }
+    else if(expr->kind == EXPR_MEMB_ACCESS_PTR)
+    {
+        lt = resolve_expr_type(expr->l, 0);
+        assert(lt->kind == TYPE_PTR && lt->base_type->kind == TYPE_STRUCT);
+        l = reduce_expr_to_atom(expr->l);
+
+        t1 = declare_tmp_var(type_ptr(type_char()));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t1),
+            make_expr_cast(dup_expr(l), type_ptr(type_char()))));
+        add_stmt(stmt);
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t1),
+            make_expr_binary(
+                EXPR_ADD,
+                make_expr_id(t1),
+                make_expr_intlit(get_struct_member_offset(lt, expr->id)))));
+        add_stmt(stmt);
+
+        aggr_el = get_struct_member(lt, expr->id);
+        assert(aggr_el);
+
+        t2 = declare_tmp_var(type_ptr(aggr_el->type));
+
+        stmt = make_stmt_expr(make_expr_binary(
+            EXPR_ASSIGN,
+            make_expr_id(t2),
+            make_expr_cast(make_expr_id(t1), type_ptr(aggr_el->type))));
+        add_stmt(stmt);
+
+        res = make_expr_unary(EXPR_DEREF, make_expr_id(t2));
     }
     else
     {
@@ -3543,7 +3975,7 @@ reduce_expr_to_atom(Expr *expr)
 void
 expr_to_irc(Expr *expr)
 {
-    Stmt *irc_stmt;
+    Stmt *stmt;
     Expr *l;
     Expr *m;
     Expr *r;
@@ -3552,7 +3984,11 @@ expr_to_irc(Expr *expr)
     Expr *args;
     Expr *tmp;
     int op;
+    int i;
+    Type *lt;
+    char *t1, *t2, *t3, *t4;
 
+    final = 0;
     if(expr->kind == EXPR_INTLIT)
     {
         /* Nothing */
@@ -3593,6 +4029,14 @@ expr_to_irc(Expr *expr)
     {
         final = reduce_expr_to_atom(expr);
     }
+    else if(expr->kind == EXPR_MEMB_ACCESS)
+    {
+        final = reduce_expr_to_atom(expr);
+    }
+    else if(expr->kind == EXPR_MEMB_ACCESS_PTR)
+    {
+        final = reduce_expr_to_atom(expr);
+    }
     else if(expr->kind == EXPR_INC_PRE || expr->kind == EXPR_DEC_PRE)
     {
         if(expr->kind == EXPR_INC_PRE)
@@ -3604,8 +4048,10 @@ expr_to_irc(Expr *expr)
             op = EXPR_SUB;
         }
         l = reduce_expr_to_atom(expr->l);
-        final = make_expr_binary(EXPR_ASSIGN, l,
-                    make_expr_binary(op, l, make_expr_intlit(1)));
+        final = make_expr_binary(
+            EXPR_ASSIGN,
+            l,
+            make_expr_binary(op, l, make_expr_intlit(1)));
     }
     else if(expr->kind >= EXPR_UNARY && expr->kind < EXPR_UNARY_END)
     {
@@ -3627,9 +4073,106 @@ expr_to_irc(Expr *expr)
     }
     else if(expr->kind == EXPR_ASSIGN)
     {
-        l = reduce_expr_to_atom(expr->l);
-        r = reduce_expr_to_atom(expr->r);
-        final = make_expr_binary(expr->kind, l, r);
+        lt = resolve_expr_type(expr->l, 0);
+        if(lt->kind == TYPE_STRUCT)
+        {
+            assert(expr->l->kind == EXPR_ID);
+
+            l = reduce_expr_to_atom(expr->l);
+            r = reduce_expr_to_atom(expr->r);
+
+            t1 = declare_tmp_var(type_ptr(lt));
+            t2 = declare_tmp_var(type_ptr(lt));
+            t3 = declare_tmp_var(type_ptr(type_char()));
+            t4 = declare_tmp_var(type_ptr(type_char()));
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t1),
+                make_expr_unary(EXPR_ADDR_OF, dup_expr(l))));
+            add_stmt(stmt);
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t2),
+                make_expr_unary(EXPR_ADDR_OF, dup_expr(r))));
+            add_stmt(stmt);
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t3),
+                make_expr_cast(make_expr_id(t1), type_ptr(type_char()))));
+            add_stmt(stmt);
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t4),
+                make_expr_cast(make_expr_id(t2), type_ptr(type_char()))));
+            add_stmt(stmt);
+
+            t1 = declare_tmp_var(type_ptr(type_int()));
+            t2 = declare_tmp_var(type_ptr(type_int()));
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t1),
+                make_expr_cast(make_expr_id(t3), type_ptr(type_int()))));
+            add_stmt(stmt);
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t2),
+                make_expr_cast(make_expr_id(t4), type_ptr(type_int()))));
+            add_stmt(stmt);
+
+            assert(lt->size % 4 == 0);
+            for(i = 0;
+                i < lt->size/4;
+                ++i)
+            {
+                stmt = make_stmt_expr(make_expr_binary(
+                    EXPR_ASSIGN,
+                    make_expr_unary(EXPR_DEREF, make_expr_id(t1)),
+                    make_expr_unary(EXPR_DEREF, make_expr_id(t2))));
+                add_stmt(stmt);
+
+                stmt = make_stmt_expr(make_expr_binary(
+                    EXPR_ASSIGN,
+                    make_expr_id(t3),
+                    make_expr_binary(
+                        EXPR_ADD,
+                        make_expr_id(t3),
+                        make_expr_intlit(4))));
+                add_stmt(stmt);
+
+                stmt = make_stmt_expr(make_expr_binary(
+                    EXPR_ASSIGN,
+                    make_expr_id(t4),
+                    make_expr_binary(
+                        EXPR_ADD,
+                        make_expr_id(t4),
+                        make_expr_intlit(4))));
+                add_stmt(stmt);
+                
+                stmt = make_stmt_expr(make_expr_binary(
+                    EXPR_ASSIGN,
+                    make_expr_id(t1),
+                    make_expr_cast(make_expr_id(t3), type_ptr(type_int()))));
+                add_stmt(stmt);
+
+                stmt = make_stmt_expr(make_expr_binary(
+                    EXPR_ASSIGN,
+                    make_expr_id(t2),
+                    make_expr_cast(make_expr_id(t4), type_ptr(type_int()))));
+                add_stmt(stmt);
+            }
+        }
+        else
+        {
+            l = reduce_expr_to_atom(expr->l);
+            r = reduce_expr_to_atom(expr->r);
+            final = make_expr_binary(expr->kind, l, r);
+        }
     }
     else if(expr->kind == EXPR_COMPOUND)
     {
@@ -3647,9 +4190,9 @@ expr_to_irc(Expr *expr)
 
     if(final)
     {
-        irc_stmt = make_stmt(STMT_EXPR);
-        irc_stmt->u.expr = final;
-        add_stmt(irc_stmt);
+        stmt = make_stmt(STMT_EXPR);
+        stmt->u.expr = final;
+        add_stmt(stmt);
     }
 }
 
@@ -4030,6 +4573,17 @@ compile_expr(FILE *fout, Expr *expr)
                 param = curr_func->type->params;
                 while(arg)
                 {
+                    /* DEBUG TODO: to delete */
+                    if(!param)
+                    {
+                        printf("FUNC %s\n", expr->l->id);
+                        printf("Invalid paramMMMM\n");
+                    }
+                    else if(!param->type)
+                    {
+                        printf("Invalid paramMMMM TYPE\n");
+                    }
+
                     ++argc;
                     compile_expr(fout, arg);
                     /* TODO: Push based on args sizes */
@@ -4311,7 +4865,9 @@ compile_unit(FILE *fout, GlobDecl *unit)
 #ifdef DEBUG
     FILE *flibc;
     char ch;
+#if 0
     FuncParam *params;
+#endif
 #endif
 
     sym_reset();
@@ -4327,6 +4883,7 @@ compile_unit(FILE *fout, GlobDecl *unit)
     fprintf(fout, "\tret\n");
 
 #ifdef DEBUG
+    fprintf(fout, "\n");
     flibc = fopen("libc.asm", "r");
     if(flibc)
     {
@@ -4339,9 +4896,17 @@ compile_unit(FILE *fout, GlobDecl *unit)
         fclose(flibc);
     }
 
+#if 0
     params = make_func_param(str_intern("c"), type_int());
     params->next = 0;
     sym_add(str_intern("putchar"), type_func(type_int(), params));
+
+    params = make_func_param(str_intern("nbytes"), type_int());
+    params->next = make_func_param(str_intern("src"), type_ptr(type_void()));
+    params->next->next = make_func_param(str_intern("dst"), type_ptr(type_void()));
+    params->next->next->next = 0;
+    sym_add(str_intern("___memcpy_aligned"), type_func(type_int(), params));
+#endif
 #else
     /* TODO: Hardcode libc into a C string */
 #endif
@@ -4360,6 +4925,7 @@ compile_unit(FILE *fout, GlobDecl *unit)
 /************************************************/
 /************************************************/
 
+
 #if 0
 #define ASMORG_API
 #include "asmorg.c"
@@ -4377,11 +4943,14 @@ main(int argc, char *argv[])
     fout = fopen("a.out.asm", "w");
 
     src = "int putchar(int c);\n"
+          "int ___memcpy_aligned(void *dst, void *src, int nbytes);\n"
+          "struct MyS { int a; int b; } s1;\n"
+          "struct MyS s2;\n"
           "int main() {\n"
-          "    int arr[10];\n"
-          "    arr[0] = 4;\n"
-          "    arr[8] = arr[0] = 3;\n"
-          "    return arr[8];\n"
+          "    s1.a = 69;\n"
+          "    s1.b = 44;\n"
+          "    s2 = s1;\n"
+          "    return s2.a - s1.b;\n"
           "}";
     parser_init(src);
     unit = parse_unit();
