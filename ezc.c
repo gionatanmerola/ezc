@@ -8,13 +8,11 @@
  * [x] Type check of arguments on function call
  * [x] Type inference
  * [x] Code generation based on type width
- * [ ] Code generation larger width than 4 bytes
- *     For example when assigning a struct, just assign its members.
  * [x] Arrays
  * [x] Array subscription operator
  * [x] Cast operator
  * [x] Arrays decay into pointers
- * [/] Structs
+ * [x] Structs
  * [ ] Unions
  * [/] Finite/Non-finite types
  * [ ] Function prototypes/Function definitions
@@ -3177,6 +3175,12 @@ check_expr(Expr *expr)
             if(lt->kind == TYPE_ARRAY)
             {
                 semantic_fatal("Cannot assign to an array variable (only to its elements)");
+            }
+
+            rt = resolve_expr_type(expr->r, lt);
+            if(lt != rt)
+            {
+                semantic_fatal("Invalid assignment expression (types mismatch)");
             }
         } break;
 
