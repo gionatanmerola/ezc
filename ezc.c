@@ -23,6 +23,11 @@
  * [ ] Do-While
  * [ ] For
  * [ ] Switch
+ * [ ] Constants
+ * [ ] Enums
+ * [ ] Variable initialization on declaration
+ * [ ] Multiple variable declaration (comma separated)
+ * [x] >,>=,<,<=
  */
 
 /******************************************************************************/
@@ -210,6 +215,26 @@ make_func_param(char *id, Type *type)
         res->id = id;
         res->type = type;
         res->next = 0;
+    }
+
+    return(res);
+}
+
+FuncParam *
+reverse_func_params_list(FuncParam *params)
+{
+    FuncParam *res;
+
+    res = 0;
+    if(!params || !(params->next))
+    {
+        res = params;
+    }
+    else
+    {
+        res = reverse_func_params_list(params->next);
+        params->next->next = params;
+        params->next = 0;
     }
 
     return(res);
@@ -598,6 +623,24 @@ sym_get(char *id)
     return(res);
 }
 
+Sym *
+sym_add_func_param(char *id, Type *type, int offset)
+{
+    Sym *res = 0;
+
+    res = &(sym_table[sym_table_count]);
+    ++sym_table_count;
+    res->id = id;
+    res->type = type;
+    res->global = 0;
+    res->offset = offset;
+    res->func = 0;
+    res->is_const = 0;
+    res->value = 0;
+
+    return(res);
+}
+
 void
 init_builtin_sym()
 {
@@ -645,6 +688,10 @@ enum
     EXPR_MOD,
     EXPR_ADD,
     EXPR_SUB,
+    EXPR_LT,
+    EXPR_LE,
+    EXPR_GT,
+    EXPR_GE,
     EXPR_BINARY_END,
 
     EXPR_TERNARY,
@@ -830,6 +877,24 @@ make_expr_compound(Expr *l)
 void print_type(Type *type);
 
 void
+print_sym_table()
+{
+    int i;
+    Sym *s;
+
+    for(i = 0;
+        i < sym_table_count;
+        ++i)
+    {
+        s = &sym_table[i];
+        printf("%d - %s => ", i, s->id);
+        print_type(s->type);
+        printf("\n");
+    }
+    print_type(s->type);
+}
+
+void
 print_expr(Expr *expr)
 {
     char *op = 0;
@@ -924,6 +989,11 @@ print_expr(Expr *expr)
         case EXPR_ADD: { op = "+"; } break;
         case EXPR_SUB: { op = "-"; } break;
 
+        case EXPR_LT: { op = "<"; } break;
+        case EXPR_LE: { op = "<="; } break;
+        case EXPR_GT: { op = ">"; } break;
+        case EXPR_GE: { op = ">="; } break;
+
         case EXPR_TERNARY:
         {
             printf("(");
@@ -992,6 +1062,8 @@ make_decl(Type *type, char *id)
 void
 print_type(Type *type)
 {
+    FuncParam *param;
+
     if(type == type_void())
     {
         printf("void");
@@ -1018,6 +1090,22 @@ print_type(Type *type)
     {
         printf("struct %s", type->id);
     }
+    else if(type->kind == TYPE_FUNC)
+    {
+        printf("func (");
+        param = type->params;
+        while(param)
+        {
+            print_type(param->type);
+            if(param->next)
+            {
+                printf(", ");
+            }
+            param = param->next;
+        }
+        printf(") => ");
+        print_type(type->base_type);
+    }
     else
     {
         fatal("Invalid type to print");
@@ -1043,6 +1131,7 @@ enum
     STMT_IF,
 
     STMT_WHILE,
+    STMT_FOR,
 
     STMT_COUNT
 };
@@ -1058,7 +1147,9 @@ Stmt
         Expr *expr;
         struct Stmt *block;
     } u;
+    Expr *init;
     Expr *cond;
+    Expr *post;
     struct Stmt *then_stmt;
     struct Stmt *else_stmt;
     struct Stmt *next;
@@ -1147,6 +1238,24 @@ make_stmt_while(Expr *cond, Stmt *then_stmt)
     return(res);
 }
 
+Stmt *
+make_stmt_for(Expr *init, Expr *cond, Expr *post, Stmt *then_stmt)
+{
+    Stmt *res = 0;
+
+    res = make_stmt(STMT_FOR);
+    if(res)
+    {
+        res->init = init;
+        res->cond = cond;
+        res->post = post;
+        res->then_stmt = then_stmt;
+        res->else_stmt = 0;
+    }
+
+    return(res);
+}
+
 void
 print_stmt(Stmt *stmt)
 {
@@ -1222,6 +1331,18 @@ print_stmt(Stmt *stmt)
             printf("(while ");
             print_expr(stmt->cond);
             printf(" ");
+            print_stmt(stmt->then_stmt);
+            printf(")");
+        } break;
+
+        case STMT_FOR:
+        {
+            printf("(for ");
+            print_expr(stmt->init);
+            printf(" ");
+            print_expr(stmt->cond);
+            printf(" ");
+            print_expr(stmt->post);
             print_stmt(stmt->then_stmt);
             printf(")");
         } break;
@@ -1364,6 +1485,7 @@ char *kword_goto;
 char *kword_if;
 char *kword_else;
 char *kword_while;
+char *kword_for;
 
 #include <stdarg.h>
 
@@ -1408,6 +1530,7 @@ parser_init(char *src)
     kword_if = str_intern("if");
     kword_else = str_intern("else");
     kword_while = str_intern("while");
+    kword_for = str_intern("for");
 }
 
 enum
@@ -1443,6 +1566,10 @@ enum
     TOK_PERCENT,
     TOK_PLUS,
     TOK_MINUS,
+    TOK_LT,
+    TOK_LE,
+    TOK_GT,
+    TOK_GE,
 
     TOK_BIN_OP_END,
 
@@ -1458,6 +1585,7 @@ enum
     TOK_KW_IF,
     TOK_KW_ELSE,
     TOK_KW_WHILE,
+    TOK_KW_FOR,
 
     TOK_COUNT
 };
@@ -1547,6 +1675,7 @@ _tok_next(int update_source)
                 else if(tok.id == kword_if) { tok.kind = TOK_KW_IF; }
                 else if(tok.id == kword_else) { tok.kind = TOK_KW_ELSE; }
                 else if(tok.id == kword_while) { tok.kind = TOK_KW_WHILE; }
+                else if(tok.id == kword_for) { tok.kind = TOK_KW_FOR; }
             } break;
 
             case '0':case '1':case '2':case '3':case '4':
@@ -1605,6 +1734,28 @@ _tok_next(int update_source)
                 {
                     ++src;
                     tok.kind = TOK_MEMB_ACCESS_PTR;
+                }
+            } break;
+
+            case '<':
+            {
+                ++src;
+                tok.kind = TOK_LT;
+                if(*src == '=')
+                {
+                    ++src;
+                    tok.kind = TOK_LE;
+                }
+            } break;
+
+            case '>':
+            {
+                ++src;
+                tok.kind = TOK_GT;
+                if(*src == '=')
+                {
+                    ++src;
+                    tok.kind = TOK_GE;
                 }
             } break;
 
@@ -1685,7 +1836,13 @@ tok_is_type(Token tok)
  *                 | <expr_unary>
  *
  * <expr_unary> ::= <un_op> <expr_unary>
- *                | <expr_base>
+ *                | <expr_first_level>
+ *
+ * <expr_first_level> ::= <expr_base>
+ *                      | <expr_base> '(' (<expr_assign> (',' <expr_assign>)*)? ')'
+ *                      | <expr_base> '[' <expr> ']'
+ *                      | <expr_base> '.' TOK_ID
+ *                      | <expr_base> '->' TOK_ID
  *
  * <expr_base> ::= '(' <expr> ')'
  *               | <int_lit>
@@ -1693,6 +1850,7 @@ tok_is_type(Token tok)
  *
  * <bin_op> ::= [/ * %]
  *            | [-+]
+ *            | [< <= > >=]
  *
  * <un_op> ::= [-+]
  *
@@ -1700,11 +1858,15 @@ tok_is_type(Token tok)
  */
 
 int op_precedence_table[TOK_BIN_OP_END - TOK_BIN_OP] = {
-    0, /* TOK_ASTERISK */
-    0, /* TOK_SLASH */
-    0, /* TOK_PERCENT */
-    1, /* TOK_PLUS */
-    1, /* TOK_MINUS */
+    3, /* TOK_ASTERISK */
+    3, /* TOK_SLASH */
+    3, /* TOK_PERCENT */
+    4, /* TOK_PLUS */
+    4, /* TOK_MINUS */
+    6, /* TOK_LT */
+    6, /* TOK_LE */
+    6, /* TOK_GT */
+    6, /* TOK_GE */
 };
 
 int
@@ -1750,11 +1912,10 @@ expr_is_const(Expr *expr)
     {
         switch(expr->kind)
         {
-            case EXPR_MUL:
-            case EXPR_DIV:
-            case EXPR_MOD:
-            case EXPR_ADD:
-            case EXPR_SUB:
+            case EXPR_MUL: case EXPR_DIV: case EXPR_MOD:
+            case EXPR_ADD: case EXPR_SUB:
+            case EXPR_LT: case EXPR_LE:
+            case EXPR_GT: case EXPR_GE:
             {
                 res = expr_is_const(expr->l);
                 res = res && expr_is_const(expr->r);
@@ -1830,6 +1991,11 @@ eval_expr(Expr *expr)
             case EXPR_MOD: { res = l%r; } break;
             case EXPR_ADD: { res = l+r; } break;
             case EXPR_SUB: { res = l-r; } break;
+
+            case EXPR_LT: { res = ((l<r)?(1):0); } break;
+            case EXPR_LE: { res = ((l<=r)?(1):0); } break;
+            case EXPR_GT: { res = ((l>r)?(1):0); } break;
+            case EXPR_GE: { res = ((l>=r)?(1):0); } break;
 
             default:
             {
@@ -2101,6 +2267,10 @@ parse_expr_binary(int precedence)
             case TOK_PERCENT: { l = make_expr_binary(EXPR_MOD, l, r); } break;
             case TOK_PLUS:    { l = make_expr_binary(EXPR_ADD, l, r); } break;
             case TOK_MINUS:   { l = make_expr_binary(EXPR_SUB, l, r); } break;
+            case TOK_LT:      { l = make_expr_binary(EXPR_LT, l, r); } break;
+            case TOK_LE:      { l = make_expr_binary(EXPR_LE, l, r); } break;
+            case TOK_GT:      { l = make_expr_binary(EXPR_GT, l, r); } break;
+            case TOK_GE:      { l = make_expr_binary(EXPR_GE, l, r); } break;
 
             default:
             {
@@ -2414,6 +2584,10 @@ parse_stmt()
     Stmt *then_stmt;
     Stmt *else_stmt;
 
+    Expr *init;
+    Expr *cond;
+    Expr *post;
+
     tok = tok_peek();
     while(tok.kind == TOK_SEMI)
     {
@@ -2510,6 +2684,23 @@ parse_stmt()
                 then_stmt = parse_stmt();
 
                 stmt = make_stmt_while(expr, then_stmt);
+            } break;
+
+            case TOK_KW_FOR:
+            {
+                tok_next();
+
+                tok_expect(TOK_LPAREN);
+                init = parse_expr();
+                tok_expect(TOK_SEMI);
+                cond = parse_expr();
+                tok_expect(TOK_SEMI);
+                post = parse_expr();
+                tok_expect(TOK_RPAREN);
+
+                then_stmt = parse_stmt();
+
+                stmt = make_stmt_for(init, cond, post, then_stmt);
             } break;
 
             default:
@@ -2620,6 +2811,7 @@ parse_glob_decl()
         }
         tok_expect(TOK_RPAREN);
 
+        params = reverse_func_params_list(params);
         type = type_func(type, params);
 
         func_def = 0;
@@ -2737,6 +2929,10 @@ resolve_expr_type(Expr *expr, Type *wanted)
             sym = sym_get(expr->id);
             if(!sym)
             {
+                /* DEBUG TODO: to delete */
+                print_sym_table();
+                printf("\n\n");
+
                 semantic_fatal("Invalid symbol %s in expression", expr->id);
             }
             type = sym->type;
@@ -3132,11 +3328,10 @@ check_expr(Expr *expr)
             }
         } break;
 
-        case EXPR_MUL:
-        case EXPR_DIV:
-        case EXPR_MOD:
-        case EXPR_ADD:
-        case EXPR_SUB:
+        case EXPR_MUL: case EXPR_DIV: case EXPR_MOD:
+        case EXPR_ADD: case EXPR_SUB:
+        case EXPR_LT: case EXPR_LE:
+        case EXPR_GT: case EXPR_GE:
         {
             lt = resolve_expr_type(expr->l, 0);
             rt = resolve_expr_type(expr->r, lt);
@@ -3299,6 +3494,14 @@ check_stmt(Stmt *stmt)
             check_stmt(stmt->then_stmt);
         } break;
 
+        case STMT_FOR:
+        {
+            check_expr(stmt->init);
+            check_expr(stmt->cond);
+            check_expr(stmt->post);
+            check_stmt(stmt->then_stmt);
+        } break;
+
         default:
         {
             assert(0);
@@ -3310,6 +3513,9 @@ void
 check_glob_decl(GlobDecl *decl)
 {
     Sym *sym;
+    FuncParam *param;
+    int sym_count;
+    int offset;
 
     switch(decl->kind)
     {
@@ -3340,8 +3546,21 @@ check_glob_decl(GlobDecl *decl)
 
             if(decl->func_def)
             {
-                func_var_offset = -4;
+                func_var_offset = -8;
+
+                sym_count = sym_table_count;
+                param = decl->type->params;
+                offset = 8;
+                while(param)
+                {
+                    sym_add_func_param(param->id, param->type, offset);
+                    offset += ALIGN(param->type->size, 4);
+                    param = param->next;
+                }
+
                 check_stmt(decl->func_def);
+
+                sym_table_count = sym_count;
             }
         } break;
 
@@ -3479,7 +3698,8 @@ declare_tmp_var(Type *type)
     return(res);
 }
 
-Stmt *block_to_irc(Stmt *block);
+void block_to_irc(Stmt *block);
+Stmt *func_def_to_irc(Stmt *block);
 
 int
 expr_is_atom(Expr *expr)
@@ -4010,17 +4230,18 @@ expr_to_irc(Expr *expr)
         r = expr->r;
         while(r)
         {
+            printf("A");
             tmp = reduce_expr_to_atom(r);
             tmp->next = 0;
 
             if(arg)
             {
-                arg->next = tmp;
+                arg->next = dup_expr(tmp);
                 arg = arg->next;
             }
             else
             {
-                arg = tmp;
+                arg = dup_expr(tmp);
                 args = arg;
             }
 
@@ -4366,6 +4587,50 @@ stmt_to_irc(Stmt *stmt)
             add_stmt(irc_stmt);
         } break;
 
+        case STMT_FOR:
+        {
+            lbl1 = lbl_gen();
+            lbl2 = lbl_gen();
+            lbl3 = lbl_gen();
+
+            expr_to_irc(stmt->init);
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl1;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            cond = reduce_expr_to_atom(stmt->cond);
+
+            irc_stmt = make_stmt_if(cond, 0, 0);
+            irc_stmt->u.label = lbl2;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_GOTO);
+            irc_stmt->u.label = lbl3;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl2;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            stmt_to_irc(stmt->then_stmt);
+
+            expr_to_irc(stmt->post);
+
+            irc_stmt = make_stmt(STMT_GOTO);
+            irc_stmt->u.label = lbl1;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+
+            irc_stmt = make_stmt(STMT_LABEL);
+            irc_stmt->u.label = lbl3;
+            irc_stmt->next = 0;
+            add_stmt(irc_stmt);
+        } break;
+
         default:
         {
             assert(0);
@@ -4373,8 +4638,21 @@ stmt_to_irc(Stmt *stmt)
     }
 }
 
-Stmt *
+void
 block_to_irc(Stmt *block)
+{
+    Stmt *stmt;
+
+    stmt = block->u.block;
+    while(stmt)
+    {
+        stmt_to_irc(stmt);
+        stmt = stmt->next;
+    }
+}
+
+Stmt *
+func_def_to_irc(Stmt *block)
 {
     Stmt *irc_block;
     Stmt *stmt;
@@ -4401,44 +4679,60 @@ unit_to_irc(GlobDecl *unit)
 {
     GlobDecl *irc_unit;
     GlobDecl *irc_curr;
-    GlobDecl *glob_decl;
+    GlobDecl *decl;
     Sym *sym;
+    int offset;
+    int sym_count;
+    FuncParam *param;
 
     sym_reset();
 
     irc_unit = 0;
     irc_curr = 0;
-    glob_decl = unit;
-    while(glob_decl)
+    decl = unit;
+    while(decl)
     {
         if(irc_unit)
         {
-            irc_curr->next = DUP_OBJ(GlobDecl, irc_curr->next, glob_decl);
+            irc_curr->next = DUP_OBJ(GlobDecl, irc_curr->next, decl);
             irc_curr = irc_curr->next;
         }
         else
         {
-            irc_unit = DUP_OBJ(GlobDecl, irc_unit, glob_decl);
+            irc_unit = DUP_OBJ(GlobDecl, irc_unit, decl);
             irc_curr = irc_unit;
         }
         irc_curr->next = 0;
 
-        switch(glob_decl->kind)
+        switch(decl->kind)
         {
             case GLOB_DECL_VAR:
             {
-                sym = sym_add(glob_decl->id, glob_decl->type);
+                sym = sym_add(decl->id, decl->type);
                 sym->global = 1;
             } break;
 
             case GLOB_DECL_FUNC:
             {
-                if(glob_decl->func_def)
-                {
-                    irc_curr->func_def = block_to_irc(glob_decl->func_def);
-                }
-                sym = sym_add(glob_decl->id, glob_decl->type);
+                sym = sym_add(decl->id, decl->type);
                 sym->global = 1;
+
+                sym_count = sym_table_count;
+                param = decl->type->params;
+                offset = 8;
+                while(param)
+                {
+                    sym_add_func_param(param->id, param->type, offset);
+                    offset += ALIGN(param->type->size, 4);
+                    param = param->next;
+                }
+
+                if(decl->func_def)
+                {
+                    irc_curr->func_def = func_def_to_irc(decl->func_def);
+                }
+
+                sym_table_count = sym_count;
             } break;
 
             default:
@@ -4446,7 +4740,7 @@ unit_to_irc(GlobDecl *unit)
                 semantic_fatal("invalid global declaration");
             } break;
         }
-        glob_decl = glob_decl->next;
+        decl = decl->next;
     }
 
     return(irc_unit);
@@ -4509,6 +4803,7 @@ compile_expr(FILE *fout, Expr *expr)
     int params_size;
     Type *type;
     char *ins;
+    char *lbl1, *lbl2;
 
     ins = 0;
     switch(expr->kind)
@@ -4574,20 +4869,9 @@ compile_expr(FILE *fout, Expr *expr)
                 argc = 0;
                 arg = expr->r;
                 params_size = 0;
-                param = curr_func->type->params;
+                param = sym->type->params;
                 while(arg)
                 {
-                    /* DEBUG TODO: to delete */
-                    if(!param)
-                    {
-                        printf("FUNC %s\n", expr->l->id);
-                        printf("Invalid paramMMMM\n");
-                    }
-                    else if(!param->type)
-                    {
-                        printf("Invalid paramMMMM TYPE\n");
-                    }
-
                     ++argc;
                     compile_expr(fout, arg);
                     /* TODO: Push based on args sizes */
@@ -4695,6 +4979,45 @@ compile_expr(FILE *fout, Expr *expr)
             fprintf(fout, "\tsubl %%ecx,%%eax\n");
         } break;
 
+        case EXPR_LT:
+        case EXPR_LE:
+        case EXPR_GT:
+        case EXPR_GE:
+        {
+            if(expr->kind == EXPR_LT)
+            {
+                ins = "jl";
+            }
+            else if(expr->kind == EXPR_LE)
+            {
+                ins = "jle";
+            }
+            else if(expr->kind == EXPR_GT)
+            {
+                ins = "jg";
+            }
+            else if(expr->kind == EXPR_GE)
+            {
+                ins = "jge";
+            }
+
+            assert(ins);
+
+            lbl1 = lbl_gen();
+            lbl2 = lbl_gen();
+
+            compile_expr(fout, expr->r);
+            fprintf(fout, "\tmovl %%eax,%%ecx\n");
+            compile_expr(fout, expr->l);
+            fprintf(fout, "\tcmpl %%ecx,%%eax\n");
+            fprintf(fout, "\t%s %s\n", ins, lbl1);
+            fprintf(fout, "\tmovl $0,%%eax\n");
+            fprintf(fout, "\tjmp %s\n", lbl2);
+            fprintf(fout, "%s:\n", lbl1);
+            fprintf(fout, "\tmovl $1,%%eax\n");
+            fprintf(fout, "%s:\n", lbl2);
+        } break;
+
         case EXPR_ASSIGN:
         {
             type = resolve_expr_type(expr, 0);
@@ -4791,6 +5114,7 @@ compile_stmt(FILE *fout, Stmt *stmt)
             {
                 compile_expr(fout, stmt->u.expr);
             }
+            fprintf(fout, "\tpopl %%ebx\n");
             fprintf(fout, "\tleave\n");
             fprintf(fout, "\tret\n");
         } break;
@@ -4824,6 +5148,9 @@ compile_glob_decl(FILE *fout, GlobDecl *decl)
 {
     Sym *sym;
     int size;
+    FuncParam *param;
+    int sym_count;
+    int offset;
 
     switch(decl->kind)
     {
@@ -4839,16 +5166,32 @@ compile_glob_decl(FILE *fout, GlobDecl *decl)
 
         case GLOB_DECL_FUNC:
         {
-            func_var_offset = -4;
+            func_var_offset = -8;
 
             if(decl->func_def)
             {
                 fprintf(fout, "%s:\n", decl->id);
                 fprintf(fout, "\tpushl %%ebp\n");
                 fprintf(fout, "\tmovl %%esp,%%ebp\n");
+                fprintf(fout, "\tpushl %%ebx\n");
+
+                sym_count = sym_table_count;
+                param = decl->type->params;
+                offset = 8;
+                while(param)
+                {
+                    sym_add_func_param(param->id, param->type, offset);
+                    offset += ALIGN(param->type->size, 4);
+                    param = param->next;
+                }
+
                 compile_stmt(fout, decl->func_def);
+
+                fprintf(fout, "\tpopl %%ebx\n");
                 fprintf(fout, "\tleave\n");
                 fprintf(fout, "\tret\n");
+
+                sym_table_count = sym_count;
             }
 
             sym = sym_add(decl->id, decl->type);
@@ -4940,31 +5283,49 @@ compile_unit(FILE *fout, GlobDecl *unit)
 int
 main(int argc, char *argv[])
 {
+    FILE *fin;
     FILE *fout;
     char *src;
     GlobDecl *unit;
+    long fsize;
+
+    if(argc <= 1)
+    {
+        printf("Usage: ./ezc <input_file> [<output_file>]\n");
+        return(1);
+    }
+
+    fin = fopen(argv[1], "r");
+    fseek(fin, 0, SEEK_END);
+    fsize = ftell(fin);
+    fseek(fin, 0, SEEK_SET);
+
+    src = (char *)malloc(fsize);
+    fread(src, fsize, 1, fin);
+    fclose(fin);
+    src[fsize - 1] = 0;
 
     fout = fopen("a.out.asm", "w");
 
+#if 0
     src = "int putchar(int c);\n"
           "int ___memcpy_aligned(void *dst, void *src, int nbytes);\n"
-          "struct MyS { int a; int b; } s1;\n"
-          "struct MyS s2;\n"
           "int main() {\n"
-          "    s1.a = 69;\n"
-          "    s1.b = 44;\n"
-          "    s2 = s1;\n"
-          "    return s2.a - s1.b;\n"
+          "    int i;\n"
+          "    for(i = 97; i < 123; ++i) putchar(i);\n"
+          "    return 9;\n"
           "}";
+#endif
+
     parser_init(src);
     unit = parse_unit();
     check_unit(unit);
 #ifdef PRINT
     print_unit(unit);
-    printf("\n\n+++++++++++++++\nIRC\n+++++++++++++++\n\n");
 #endif
     unit = unit_to_irc(unit);
 #ifdef PRINT
+    printf("\n\n+++++++++++++++\nIRC\n+++++++++++++++\n\n");
     print_unit(unit);
     printf("\n\n+++++++++++++++\nx86\n+++++++++++++++\n\n");
 #endif
