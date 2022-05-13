@@ -28,6 +28,9 @@
  * [ ] Variable initialization on declaration
  * [ ] Multiple variable declaration (comma separated)
  * [x] >,>=,<,<=
+ * [ ] When utilizing a temp var, get that from a pool of unused temp vars.
+ *     If not availbe, only then, create a new one. This makes the debug of
+ *     the generated code (and binary file) easier.
  */
 
 /******************************************************************************/
@@ -3328,8 +3331,26 @@ check_expr(Expr *expr)
             }
         } break;
 
-        case EXPR_MUL: case EXPR_DIV: case EXPR_MOD:
         case EXPR_ADD: case EXPR_SUB:
+        {
+            lt = resolve_expr_type(expr->l, 0);
+            rt = resolve_expr_type(expr->r, lt);
+
+            if(lt->kind == TYPE_PTR && rt->kind == TYPE_PTR)
+            {
+                semantic_fatal("Cannot add or subtract 2 pointers");
+            }
+            else if(lt->kind == TYPE_PTR && rt != type_char() && rt != type_int())
+            {
+                semantic_fatal("Pointer can added or subtracted only with integers or chars");
+            }
+            else if(rt->kind == TYPE_PTR && lt != type_char() && lt != type_int())
+            {
+                semantic_fatal("Pointer can added or subtracted only with integers or chars");
+            }
+        } break;
+
+        case EXPR_MUL: case EXPR_DIV: case EXPR_MOD:
         case EXPR_LT: case EXPR_LE:
         case EXPR_GT: case EXPR_GE:
         {
@@ -3420,7 +3441,14 @@ check_stmt(Stmt *stmt)
 
             sym = sym_add(decl->id, decl->type);
             sym->global = 0;
-            sym->offset = func_var_offset;
+            if(decl->type->kind == TYPE_ARRAY)
+            {
+                sym->offset = func_var_offset - decl->type->size + decl->type->base_type->size;
+            }
+            else
+            {
+                sym->offset = func_var_offset;
+            }
             func_var_offset -= decl->type->size;
         } break;
 
@@ -3546,7 +3574,7 @@ check_glob_decl(GlobDecl *decl)
 
             if(decl->func_def)
             {
-                func_var_offset = -8;
+                func_var_offset = -4;
 
                 sym_count = sym_table_count;
                 param = decl->type->params;
@@ -3683,17 +3711,66 @@ add_stmt(Stmt *stmt)
     }
 }
 
+#define TMP_VARS_POOL_SIZE 100
+Sym tmp_vars_pool[TMP_VARS_POOL_SIZE];
+int tmp_vars_pool_count;
+
+void
+tmp_vars_pool_reset()
+{
+    tmp_vars_pool_count = 0;
+}
+
+void
+tmp_vars_free()
+{
+    int i;
+
+    for(i = tmp_vars_pool_count - 1;
+        i >= 0;
+        --i)
+    {
+        tmp_vars_pool[i].value = 0;
+    }
+}
+
 char *
 declare_tmp_var(Type *type)
 {
     char *res;
     Stmt *stmt;
+    int i;
+    Sym *sym;
 
-    res = tmp_var();
-    assert(type);
-    stmt = make_stmt_decl(make_decl(type, res));
-    stmt->next = 0;
-    add_stmt(stmt);
+    sym = 0;
+    for(i = tmp_vars_pool_count - 1;
+        i >= 0;
+        --i)
+    {
+        if(tmp_vars_pool[i].type == type && tmp_vars_pool[i].value == 0)
+        {
+            sym = &(tmp_vars_pool[i]);
+        }
+    }
+
+    if(sym)
+    {
+        res = sym->id;
+    }
+    else
+    {
+        res = tmp_var();
+        assert(type);
+        stmt = make_stmt_decl(make_decl(type, res));
+        stmt->next = 0;
+        add_stmt(stmt);
+
+        sym = &(tmp_vars_pool[tmp_vars_pool_count]);
+        sym->id = res;
+        sym->type = type;
+        ++tmp_vars_pool_count;
+    }
+    sym->value = 1;
 
     return(res);
 }
@@ -3729,7 +3806,10 @@ store_expr_temp_var(Expr *expr)
     Expr *args;
     Expr *tmp;
 
+    Type *type;
     Type *lt;
+    Type *mt;
+    Type *rt;
     char *t1;
     char *t2;
     char *t3;
@@ -3739,10 +3819,13 @@ store_expr_temp_var(Expr *expr)
     char *lbl2;
     char *lbl3;
 
-    res = tmp_var();
-    stmt = make_stmt(STMT_DECL);
-    stmt->u.decl = make_decl(resolve_expr_type(expr, 0), res);
-    add_stmt(stmt);
+    type = resolve_expr_type(expr, 0);
+    if(expr->kind == EXPR_ID && type->kind == TYPE_ARRAY)
+    {
+        type = type_ptr(type->base_type);
+    }
+
+    res = declare_tmp_var(type);
 
     rvalue = 0;
     if(expr_is_atom(expr))
@@ -3754,7 +3837,6 @@ store_expr_temp_var(Expr *expr)
             /* Array decays into a pointer */
             if(lt->kind == TYPE_ARRAY)
             {
-                stmt->u.decl->type = type_ptr(lt->base_type);
                 rvalue = make_expr_id(expr->id);
             }
             else
@@ -3813,11 +3895,7 @@ store_expr_temp_var(Expr *expr)
 
         t2 = store_expr_temp_var(expr->l);
 
-        t3 = tmp_var();
-        stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(type_ptr(type_char()), t3);
-        stmt->next = 0;
-        add_stmt(stmt);
+        t3 = declare_tmp_var(type_ptr(type_char()));
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
@@ -3932,6 +4010,65 @@ store_expr_temp_var(Expr *expr)
     {
         l = reduce_expr_to_atom(expr->l);
         rvalue = make_expr_unary(expr->kind, l);
+    }
+    else if(expr->kind == EXPR_ADD || expr->kind == EXPR_SUB)
+    {
+        lt = resolve_expr_type(expr->l, 0);
+        rt = resolve_expr_type(expr->r, 0);
+
+        if(lt->kind == TYPE_PTR || rt->kind == TYPE_PTR)
+        {
+            /* TODO: HERE */
+            if(lt->kind == TYPE_PTR)
+            {
+                l = reduce_expr_to_atom(expr->l);
+                r = reduce_expr_to_atom(expr->r);
+            }
+            else
+            {
+                l = reduce_expr_to_atom(expr->r);
+                r = reduce_expr_to_atom(expr->l);
+                mt = rt;
+                rt = lt;
+                lt = mt;
+            }
+
+            t1 = declare_tmp_var(type_ptr(type_char()));
+            t2 = declare_tmp_var(lt);
+            t3 = declare_tmp_var(type_int());
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t3),
+                make_expr_binary(
+                    EXPR_MUL,
+                    dup_expr(r),
+                    make_expr_intlit(lt->base_type->size))));
+            add_stmt(stmt);
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t1),
+                make_expr_cast(dup_expr(l), type_ptr(type_char()))));
+            add_stmt(stmt);
+
+            stmt = make_stmt_expr(make_expr_binary(
+                EXPR_ASSIGN,
+                make_expr_id(t1),
+                make_expr_binary(
+                    EXPR_ADD,
+                    make_expr_id(t1),
+                    make_expr_id(t3))));
+            add_stmt(stmt);
+
+            rvalue = make_expr_cast(make_expr_id(t1), lt);
+        }
+        else
+        {
+            l = reduce_expr_to_atom(expr->l);
+            r = reduce_expr_to_atom(expr->r);
+            rvalue = make_expr_binary(expr->kind, l, r);
+        }
     }
     else if(expr->kind >= EXPR_BINARY && expr->kind < EXPR_BINARY_END)
     {
@@ -4071,11 +4208,7 @@ reduce_expr_to_atom(Expr *expr)
 
         t2 = store_expr_temp_var(expr->l);
 
-        t3 = tmp_var();
-        stmt = make_stmt(STMT_DECL);
-        stmt->u.decl = make_decl(type_ptr(type_char()), t3);
-        stmt->next = 0;
-        add_stmt(stmt);
+        t3 = declare_tmp_var(type_ptr(type_char()));
 
         stmt = make_stmt(STMT_EXPR);
         stmt->u.expr = make_expr_binary(
@@ -4442,7 +4575,14 @@ stmt_to_irc(Stmt *stmt)
 
             sym = sym_add(stmt->u.decl->id, stmt->u.decl->type);
             sym->global = 0;
-            sym->offset = func_var_offset;
+            if(stmt->u.decl->type->kind == TYPE_ARRAY)
+            {
+                sym->offset = func_var_offset - stmt->u.decl->type->size + stmt->u.decl->type->base_type->size;
+            }
+            else
+            {
+                sym->offset = func_var_offset;
+            }
             func_var_offset -= stmt->u.decl->type->size;
         } break;
 
@@ -4636,19 +4776,24 @@ stmt_to_irc(Stmt *stmt)
             assert(0);
         } break;
     }
+
+    tmp_vars_free();
 }
 
 void
 block_to_irc(Stmt *block)
 {
     Stmt *stmt;
+    int tmp_vars_old_count;
 
+    tmp_vars_old_count = tmp_vars_pool_count;
     stmt = block->u.block;
     while(stmt)
     {
         stmt_to_irc(stmt);
         stmt = stmt->next;
     }
+    tmp_vars_pool_count = tmp_vars_old_count;
 }
 
 Stmt *
@@ -4657,7 +4802,9 @@ func_def_to_irc(Stmt *block)
     Stmt *irc_block;
     Stmt *stmt;
     Stmt *parent_block;
+    int tmp_vars_old_count;
 
+    tmp_vars_old_count = tmp_vars_pool_count;
     irc_block = make_stmt(STMT_BLOCK);
     irc_block->u.block = 0;
     parent_block = curr_block;
@@ -4670,6 +4817,7 @@ func_def_to_irc(Stmt *block)
     }
 
     curr_block = parent_block;
+    tmp_vars_pool_count = tmp_vars_old_count;
 
     return(irc_block);
 }
@@ -4686,6 +4834,7 @@ unit_to_irc(GlobDecl *unit)
     FuncParam *param;
 
     sym_reset();
+    tmp_vars_pool_reset();
 
     irc_unit = 0;
     irc_curr = 0;
@@ -5074,7 +5223,14 @@ compile_decl(FILE *fout, Decl *decl)
 
     sym = sym_add(decl->id, decl->type);
     sym->global = 0;
-    sym->offset = func_var_offset;
+    if(decl->type->kind == TYPE_ARRAY)
+    {
+        sym->offset = func_var_offset - decl->type->size + decl->type->base_type->size;
+    }
+    else
+    {
+        sym->offset = func_var_offset;
+    }
     func_var_offset -= decl->type->size;
 }
 
@@ -5166,7 +5322,7 @@ compile_glob_decl(FILE *fout, GlobDecl *decl)
 
         case GLOB_DECL_FUNC:
         {
-            func_var_offset = -8;
+            func_var_offset = -4;
 
             if(decl->func_def)
             {
@@ -5285,17 +5441,23 @@ main(int argc, char *argv[])
 {
     FILE *fin;
     FILE *fout;
+    char *fin_name;
     char *src;
     GlobDecl *unit;
     long fsize;
 
+#if DEBUG
+    fin_name = "tests/test.c";
+#else
     if(argc <= 1)
     {
         printf("Usage: ./ezc <input_file> [<output_file>]\n");
         return(1);
     }
+    fin_name = argv[1];
+#endif
 
-    fin = fopen(argv[1], "r");
+    fin = fopen(fin_name, "r");
     fseek(fin, 0, SEEK_END);
     fsize = ftell(fin);
     fseek(fin, 0, SEEK_SET);
