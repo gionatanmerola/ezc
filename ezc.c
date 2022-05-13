@@ -3441,15 +3441,8 @@ check_stmt(Stmt *stmt)
 
             sym = sym_add(decl->id, decl->type);
             sym->global = 0;
-            if(decl->type->kind == TYPE_ARRAY)
-            {
-                sym->offset = func_var_offset - decl->type->size + decl->type->base_type->size;
-            }
-            else
-            {
-                sym->offset = func_var_offset;
-            }
             func_var_offset -= decl->type->size;
+            sym->offset = func_var_offset;
         } break;
 
         case STMT_EXPR:
@@ -4575,15 +4568,8 @@ stmt_to_irc(Stmt *stmt)
 
             sym = sym_add(stmt->u.decl->id, stmt->u.decl->type);
             sym->global = 0;
-            if(stmt->u.decl->type->kind == TYPE_ARRAY)
-            {
-                sym->offset = func_var_offset - stmt->u.decl->type->size + stmt->u.decl->type->base_type->size;
-            }
-            else
-            {
-                sym->offset = func_var_offset;
-            }
             func_var_offset -= stmt->u.decl->type->size;
+            sym->offset = func_var_offset;
         } break;
 
         case STMT_EXPR:
@@ -5223,15 +5209,8 @@ compile_decl(FILE *fout, Decl *decl)
 
     sym = sym_add(decl->id, decl->type);
     sym->global = 0;
-    if(decl->type->kind == TYPE_ARRAY)
-    {
-        sym->offset = func_var_offset - decl->type->size + decl->type->base_type->size;
-    }
-    else
-    {
-        sym->offset = func_var_offset;
-    }
     func_var_offset -= decl->type->size;
+    sym->offset = func_var_offset;
 }
 
 void
